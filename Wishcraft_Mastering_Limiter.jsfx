@@ -1,0 +1,1804 @@
+desc:Wishcraft Mastering Limiter
+
+// OPTIMIZED (CPU): Conditional dry-path FIR downsampling + hoisted link_frac.
+// Gained-dry FIR only when Delta active; raw-dry FIR only when Bypass active.
+// Buffers always filled → seamless mode switches. Normal mode lightest; Bypass
+// now pays only two extra convolves (was four), fixing the 4x stutter on Bypass.
+// Preserves exact audio, latency, and all features.
+
+// fx_ident: "Wishcraft Mastering Limiter" -- this desc: string is now FINAL. DSP/metering
+// work is complete as of Phase 8b; everything from here is the CS skin. Do not change
+// this string without also re-keying the skin.
+//
+// PLACEHOLDER -- rename options:gmem= below to match your CS system's actual gmem naming
+// convention before wiring up the skin. This name is what the companion skin script
+// needs to reference to read the gmem[] slots written at the end of @sample.
+options:gmem=WishcraftMasteringLimiter
+
+// DSP/METERING SCOPE (complete as of Phase 8b -- see prior file revisions for full
+// phase-by-phase history; summarized here for the final signal path):
+// Selectivity: duration-gated pre-clip stage with sidechain-filtered detection, Auto
+// Makeup Gain (permanently on), fixed CHAR_MAX_MS=5.0 and DELTA_GAIN_DB=6.0 (both
+// settled by ear, no longer live sliders).
+// Limiter: lookahead + program-dependent release (two-time-constant history blend),
+// Auto Gain (permanently on, capped by min(Ceiling, True Peak Output Ceiling) so it
+// can't restore level past the hard safety limit), Stereo Link (post-smoothing blend,
+// min-gain-wins).
+// Sidechain EQ: detector-only low/high shelf, fixed 300Hz pivot, separate filter
+// instances for Character's and the Limiter's detectors.
+// Safety: two-stage true-peak-aware clip (oversampled-domain + post-downsample
+// backstop), click-free parameter smoothing (one shared time constant) on all gain-type
+// controls, denormal protection on every recursive state value, latency-compensated
+// Bypass (own slider, priority Bypass > Delta > Normal).
+// Metering: GR, True Peak, and Character Activity, each with live ballistics, a 1s
+// peak-hold marker (20 dB/sec fall), and text readouts showing the HELD value (not
+// live). Two-tier Over indicator on True Peak -- yellow past Output Ceiling (accepted
+// mastering-level clipping), red past true 0 dBTP (hard digital clipping) -- both
+// checked against the peak-hold value, not the live one. All of the above exported to
+// gmem for the skin to probe.
+// Delta Listen Mode now respects the actual Character slider setting (no longer
+// forces 100%/Aggressive). Character defaults to 50%.
+
+slider1:os_choice=1<0,1,1{2x,4x}>-Oversampling Factor
+slider2:threshold_db=-3<-24,0,0.01>-Selective Clip Threshold (dB)
+slider3:character=50<0,100,0.1>-Selectivity (0=Transparent .. 100=Aggressive)
+slider4:listen_mode=0<0,1,1{Normal,Delta (what was removed)}>-Listen Mode
+slider5:ceiling_db=-1<-18,0,0.01>-Limiter Ceiling (dB)
+slider6:lookahead_ms=3<0.5,20,0.1>-Limiter Lookahead (ms)
+slider7:release_pct=30<0,100,0.1>-Release
+slider8:input_gain_db=0<0,24,0.1>-Input Gain (Drive) -- pushes signal into the Limiter, after Character
+slider9:output_ceiling_db=-1<-3,0,0.01>-True Peak Output Ceiling (safety clip)
+slider10:link_pct=75<0,100,0.1>-Stereo Link
+slider11:sc_low_shelf_db=0<-6,6,0.1>-Sidechain Low Shelf (dB)
+slider12:sc_high_shelf_db=0<-6,6,0.1>-Sidechain High Shelf (dB)
+slider13:bypass=0<0,1,1{Off,On}>-Bypass (latency-compensated)
+slider14:limiter_auto_gain=0<0,1,1{Off,On}>-Limiter Auto Gain
+
+in_pin:left input
+in_pin:right input
+out_pin:left output
+out_pin:right output
+
+@init
+
+// ---- Oversampling (validated Phase 2 v3, unchanged) ----
+DELAY_SAMPLES_BASE = 121;
+MAX_FACTOR = 4;
+MAX_NTAPS = DELAY_SAMPLES_BASE * MAX_FACTOR + 1;
+RAW_HIST_LEN = DELAY_SAMPLES_BASE + 1;
+LN10 = log(10);
+
+coeffs    = 0;
+raw_histL = coeffs + MAX_NTAPS;
+raw_histR = raw_histL + 2*RAW_HIST_LEN;
+down_bufL = raw_histR + 2*RAW_HIST_LEN;
+down_bufR = down_bufL + 2*MAX_NTAPS;
+
+// ---- Character stage (NEW) ----
+// Phase 8: char_max_ms settled by ear during testing and is now a fixed constant rather
+// than a live-tunable slider -- collapses the old "worst-case allocation vs. current
+// budget" split entirely, since there's no longer any runtime variability to allocate
+// headroom for. Buffer sizing is exact for this one value now, not worst-case for a
+// 1-20ms range.
+CHAR_MAX_MS = 5.0;
+CHAR_MARGIN_BASE = 2; // safety margin (base-rate-equivalent samples) so an excursion's
+                       // fate is always resolved before it's evicted from the buffer
+CHAR_BUDGET_BASE_ALLOC = ceil(CHAR_MAX_MS * 0.001 * srate) + CHAR_MARGIN_BASE;
+CHAR_BUF_ALLOC = CHAR_BUDGET_BASE_ALLOC * MAX_FACTOR; // exact allocation (factor=4, fixed ms)
+
+char_audioL = down_bufR + 2*MAX_NTAPS;
+char_audioR = char_audioL + CHAR_BUF_ALLOC;
+char_flagL  = char_audioR + CHAR_BUF_ALLOC;
+char_flagR  = char_flagL + CHAR_BUF_ALLOC;
+char_stateL = char_flagR + CHAR_BUF_ALLOC; // 3 words: [0]=in_excursion [1]=start_pos [2]=width
+char_stateR = char_stateL + 3;
+
+// Bare-delay buffers for the dry (Listen Mode) path -- same length as Character's own
+// buffer, so the dry signal experiences IDENTICAL total delay to the processed signal
+// before the two are compared. Feeding the dry path from up_L/up_R directly (skipping
+// this) was the actual bug: it left the dry path char_buf_size samples AHEAD of the wet
+// path, so the "delta" was really two misaligned copies of the same audio, not the
+// difference Character actually made -- which is what caused the slamming/automute.
+char_dry_bufL = char_stateR + 3;
+char_dry_bufR = char_dry_bufL + CHAR_BUF_ALLOC;
+
+// Parallel down-conversion path fed from the delay-matched dry signal, sharing the exact
+// same wpos_down and coefficients as the main path -- so it experiences identical delay
+// and filtering. Subtracting it from the main output isolates exactly what Character did.
+down_dry_bufL = char_dry_bufR + CHAR_BUF_ALLOC;
+down_dry_bufR = down_dry_bufL + 2*MAX_NTAPS;
+
+// Phase 11b: Bypass needs a genuinely different reference than Delta now -- Delta still
+// compares against the GAINED dry signal (matching what Character actually removed at
+// the level you're driving), but Bypass should reflect the TRUE input, before Gain (and
+// therefore before Character too, since Gain now sits after Character). Rather than
+// reuse down_dry_bufL/R for both, this is a second, fully parallel down-conversion path
+// fed from the RAW (un-gained) dry signal.
+down_dry_raw_bufL = down_dry_bufR + 2*MAX_NTAPS;
+down_dry_raw_bufR = down_dry_raw_bufL + 2*MAX_NTAPS;
+
+// ---- Limiter stage (NEW) ----
+// Own lookahead buffer, sized the same adjustable-ceiling way as Character's. No gain
+// reduction history/state is stored in the buffer itself -- la_stateL/R hold the running
+// envelope (gr_smoothed_db, gr_history_db) directly as scalars-via-memory, same pattern
+// as Character's excursion state.
+LA_MAX_MS_CEILING = 20;
+LA_BUDGET_BASE_ALLOC = ceil(LA_MAX_MS_CEILING * 0.001 * srate);
+LA_BUF_ALLOC = LA_BUDGET_BASE_ALLOC * MAX_FACTOR;
+
+la_bufL = down_dry_raw_bufR + 2*MAX_NTAPS;
+la_bufR = la_bufL + LA_BUF_ALLOC;
+la_stateL = la_bufR + LA_BUF_ALLOC; // [0]=gr_smoothed_db [1]=gr_history_db
+la_stateR = la_stateL + 2;
+
+// Dry path continues through an equivalent PLAIN delay at the Limiter's position (no
+// gain reduction) so Listen Mode's dry comparison stays time-matched to the full
+// Character+Limiter chain, not just Character alone. This carries the GAINED dry signal
+// (Delta's reference).
+la_dry_bufL = la_stateR + 2;
+la_dry_bufR = la_dry_bufL + LA_BUF_ALLOC;
+
+// Phase 11b: second, parallel lookahead delay carrying the RAW (un-gained) dry signal --
+// Bypass's reference now that it needs to differ from Delta's (see down_dry_raw_bufL/R
+// above for the matching downsample-side buffer).
+la_dry_raw_bufL = la_dry_bufR + LA_BUF_ALLOC;
+la_dry_raw_bufR = la_dry_raw_bufL + LA_BUF_ALLOC;
+
+// Auto Makeup Gain: tracks a peak-follower level estimate of Character's dry vs.
+// processed output (using the already-time-aligned dry_L/char_L pair) and applies the
+// ratio as makeup gain before the signal reaches the Limiter -- restoring the peak
+// headroom Character's clipping bought, without reconstructing the individual clipped
+// peaks themselves (which would defeat the point of clipping them).
+makeup_stateL = la_dry_raw_bufR + LA_BUF_ALLOC; // [0]=smoothed dry level [1]=smoothed char level
+makeup_stateR = makeup_stateL + 2;
+
+// Phase 11: full-chain Auto Gain (redesigned) -- same peak-ratio-and-clamp mechanism as
+// Character's Auto Makeup Gain above, reused via the same apply_makeup() function, but
+// comparing the RAW dry signal (true plugin input) against the fully-processed Limiter
+// output. This is what makes "signal leaving the plugin match the level of the signal
+// entering it" an actual, literal peak-tracked ratio rather than a Ceiling-derived
+// formula -- see the @sample call site for the full reasoning.
+full_gain_stateL = makeup_stateR + 2; // [0]=smoothed dry level [1]=smoothed processed level
+full_gain_stateR = full_gain_stateL + 2;
+
+// Phase 11e: Delta mode gets its OWN Auto Gain state, separate from full_gain_stateL/R
+// above. Delta's signal (charonly_la_L/R, Character-only, no Limiter GR) sits at a
+// genuinely different level relationship to dry than the Normal-mode Limiter path does --
+// reusing the Limiter path's ratio wouldn't produce the right compensation here. Without
+// this, Delta had no Auto Gain at all: aggressive Character/Drive settings could push
+// charonly_la_L/R hot enough to clip at the safety stage, with nothing holding it to a
+// sane level the way Normal mode's output already was.
+// Allocated but no longer USED for its original purpose (Phase 11e applied Auto Gain to
+// Delta's charonly_la_L/R here, which turned out to corrupt Delta's isolation -- see
+// @sample for the corrected fix, which clips the final boosted delta value instead).
+// Left allocated rather than renumbering the memory layout for one small unused block.
+delta_gain_stateL = full_gain_stateR + 2;
+delta_gain_stateR = delta_gain_stateL + 2;
+
+// Limiter-bypass path for Listen Mode: Character's output (post makeup gain), delayed by
+// an equivalent amount to the Limiter's lookahead, but with NO gain reduction applied.
+// Delta mode compares against this instead of the fully-limited output, so it isolates
+// what Character did without the Limiter's own reaction to Character's changes muddying
+// the picture. The real Limiter still runs every tick regardless of listen_mode (its
+// state has to stay live), this is purely an alternate OUTPUT selection.
+charonly_la_bufL = delta_gain_stateR + 2;
+charonly_la_bufR = charonly_la_bufL + LA_BUF_ALLOC;
+
+// ---- Sidechain EQ (detector-only, NEW) ----
+// Fixed pivot, two shelves, shared gain controls -- but each detection point (Character's,
+// the Limiter's) runs its OWN filter instance on its OWN current signal. Reusing one
+// literal filtered stream at both points would be wrong: Character detects pre-processing,
+// the Limiter detects post-Character+makeup-gain, which sits at a genuinely different
+// absolute level -- sharing state across that gap would make the Limiter under-react to
+// what's actually reaching it. Same shelf shape everywhere; separate running memory.
+SC_PIVOT_HZ = 300;
+sc_low_coef  = charonly_la_bufR + LA_BUF_ALLOC; // [0]=b0 [1]=b1 [2]=b2 [3]=a1 [4]=a2
+sc_high_coef = sc_low_coef + 5;
+
+// Each biquad instance: [0]=x1 [1]=x2 [2]=y1 [3]=y2
+sc_char_low_stateL  = sc_high_coef + 5;
+sc_char_low_stateR  = sc_char_low_stateL + 4;
+sc_char_high_stateL = sc_char_low_stateR + 4;
+sc_char_high_stateR = sc_char_high_stateL + 4;
+sc_lim_low_stateL   = sc_char_high_stateR + 4;
+sc_lim_low_stateR   = sc_lim_low_stateL + 4;
+sc_lim_high_stateL  = sc_lim_low_stateR + 4;
+sc_lim_high_stateR  = sc_lim_high_stateL + 4;
+
+// ---- Peak-hold marker state (Phase 8b) -- one pair per meter, per channel. Each is
+// [0]=hold_val [1]=hold_timer (samples remaining before the fall phase starts).
+gr_hold_stateL   = sc_lim_high_stateR + 4;
+gr_hold_stateR   = gr_hold_stateL + 2;
+tp_hold_stateL   = gr_hold_stateR + 2;
+tp_hold_stateR   = tp_hold_stateL + 2;
+char_hold_stateL = tp_hold_stateR + 2;
+char_hold_stateR = char_hold_stateL + 2;
+
+// Phase 12c: Dynamic Range tracker state -- only [0] is used (envelope-follower value),
+// [1] is unused now that this no longer uses peak-hold's hold-timer mechanism, left
+// allocated as-is to avoid touching the memory layout again for one spare word per
+// channel.
+tp_lra_max_stateL = char_hold_stateR + 2;
+tp_lra_max_stateR = tp_lra_max_stateL + 2;
+tp_lra_min_stateL = tp_lra_max_stateR + 2;
+tp_lra_min_stateR = tp_lra_min_stateL + 2;
+
+// Short-term LUFS (BS.1770-style K-weight + ~3 s mean-square).
+// Each K-weight channel uses two biquads × 4 state words = 8 words.
+lufs_kw1_L = tp_lra_min_stateR + 2; // [0..3] first K-weight stage
+lufs_kw2_L = lufs_kw1_L + 4;        // [0..3] second K-weight stage
+lufs_kw1_R = lufs_kw2_L + 4;
+lufs_kw2_R = lufs_kw1_R + 4;
+lufs_ms_env = lufs_kw2_R + 4;       // scalar mean-square envelope (1 word)
+// Shared K-weight coefficients (computed in reconfigure): 5 + 5
+lufs_kw1_coef = lufs_ms_env + 1;
+lufs_kw2_coef = lufs_kw1_coef + 5;
+
+freembuf(lufs_kw2_coef + 5);
+
+// Denormal protection: flushes any value that's decayed into subnormal-float territory
+// to a hard zero. Threshold (~1e-15, about -300dB) sits nowhere near audible but well
+// above where the FPU actually starts choking on subnormals -- headed off before it
+// happens, rather than reacting to it. More robust than DC/noise-injection here since
+// several of the states this protects (Limiter GR/history, meter decay) decay via
+// dB-domain math, not causally driven by the audio input at all.
+function dn(x) ( abs(x) < 0.000000000000001 ? 0 : x );
+
+// Peak-hold marker (Phase 8b, generalized in Phase 12): jumps instantly to a new extreme,
+// holds for hold_time_samples, then falls back at fall_per_sample_db per sample (classic
+// VU peak-fall) -- never falling PAST the live value, since a check for a fresh extreme
+// happens every call regardless of hold/fall state, so the live meter passing the
+// falling marker just looks like the marker catching up to it. Two variants since GR's
+// "extreme" is the most NEGATIVE value reached (deepest reduction) while True
+// Peak/Character's is the most POSITIVE (loudest/most removed) -- same shape, opposite
+// comparison direction. hold_time_samples/fall_per_sample_db are now parameters, not
+// hardcoded globals, so this same mechanism can run at a different timescale for
+// different purposes (the 1s markers vs. the much longer LRA-style tracker below) without
+// needing separate near-duplicate functions.
+function peak_hold_high(state, current_val, hold_time_samples, fall_per_sample_db) local(hold_val, hold_timer) (
+  hold_val = state[0];
+  hold_timer = state[1];
+  current_val > hold_val ? (
+    hold_val = current_val;
+    hold_timer = hold_time_samples;
+  ) : (
+    hold_timer > 0 ? (
+      hold_timer -= 1;
+    ) : (
+      hold_val -= fall_per_sample_db;
+      hold_val < current_val ? hold_val = current_val;
+    );
+  );
+  state[0] = hold_val;
+  state[1] = hold_timer;
+  hold_val;
+);
+
+function peak_hold_low(state, current_val, hold_time_samples, fall_per_sample_db) local(hold_val, hold_timer) (
+  hold_val = state[0];
+  hold_timer = state[1];
+  current_val < hold_val ? (
+    hold_val = current_val;
+    hold_timer = hold_time_samples;
+  ) : (
+    hold_timer > 0 ? (
+      hold_timer -= 1;
+    ) : (
+      hold_val += fall_per_sample_db;
+      hold_val > current_val ? hold_val = current_val;
+    );
+  );
+  state[0] = hold_val;
+  state[1] = hold_timer;
+  hold_val;
+);
+
+// Envelope-follower tracker (Phase 12c -- replaces peak-hold for the Dynamic Range
+// tracker specifically). Unlike peak_hold_high/low above, this NEVER jumps instantly to
+// a new extreme -- it eases toward the current value at attack_coeff when moving toward
+// more extreme, release_coeff when moving back. With a multi-second attack time
+// constant, a one-pole filter physically cannot travel far in under a second, so a brief
+// (<1s) pause or dip barely moves it at all -- exactly the "smooth, slow-moving average"
+// behavior peak-hold's instant-jump-then-linear-fall shape couldn't provide, no matter
+// how the hold/fall timing was tuned.
+function lra_track_high(state, current_val, attack_coeff, release_coeff) local(val) (
+  val = state[0];
+  current_val > val ? (
+    val += (current_val - val) * attack_coeff;
+  ) : (
+    val += (current_val - val) * release_coeff;
+  );
+  state[0] = dn(val);
+  val;
+);
+
+function lra_track_low(state, current_val, attack_coeff, release_coeff) local(val) (
+  val = state[0];
+  current_val < val ? (
+    val += (current_val - val) * attack_coeff;
+  ) : (
+    val += (current_val - val) * release_coeff;
+  );
+  state[0] = dn(val);
+  val;
+);
+
+// ---- Phase 9 UI preview widgets (STATIC -- no mouse handling yet) --------------------
+// Purpose: judge real on-screen layout/spacing/overlap in actual REAPER gfx rendering,
+// not an HTML approximation. Each widget reads the ACTUAL current parameter value (so
+// moving the still-visible native sliders updates these live) but nothing here is
+// clickable yet -- that's the next pass, once layout itself is confirmed.
+//
+// Proportional resize: everything below is written and CALLED in fixed DESIGN-space
+// coordinates (see DESIGN_W/DESIGN_H at the top of @gfx). SCALE/OFF_X/OFF_Y are computed
+// ONCE per frame from the actual window size and referenced directly inside these
+// functions (not passed as params) -- SX()/SY()/SZ() convert a design coordinate to the
+// real on-screen pixel. This is the only mechanism making the layout "proportionately
+// resizable" -- there's no separate resize-specific code path, the static layout numbers
+// below ARE the resize logic, just run through these three conversions.
+DEG2RAD = 0.017453292519943295;
+
+function SX(v) ( v * SCALE + OFF_X );
+function SY(v) ( v * SCALE + OFF_Y );
+function SZ(v) ( v * SCALE );
+
+// base_size is a DESIGN-space font size (e.g. 13 for headers, 10 for labels); scaled and
+// floored to an integer, with a hard floor of 8px so text never scales into illegibility
+// even if it means overflowing its allotted space slightly at very small window sizes.
+// Memoized -- gfx_setfont has real cost, and this was being called 2-4x per widget
+// (once per label/value/endcap) even when consecutive calls request the identical
+// pixel size. Only actually switches fonts when the computed size changes from the
+// last call; self-correcting across frames even if SCALE changes (a resize just means
+// the next call's computed px differs from the cached one, triggering a fresh switch).
+// Likely fix for the 4x-oversampling stutter -- @gfx redraw competing for CPU with the
+// heavier DSP load, not something in the audio path itself.
+function set_font(base_size) local(px) (
+  px = max(10, floor(base_size * SCALE + 0.5));
+  px != last_font_px ? (
+    gfx_setfont(1, "Arial", px);
+    last_font_px = px;
+  );
+);
+
+// norm: 0..1 already-normalized value. Sweep matches a conventional rotary pot: -135deg
+// to +135deg (270deg total), 0=fully counterclockwise, 1=fully clockwise. Style matches
+// Wishcraft Calm's native @gfx convention: label ABOVE the knob, formatted value BELOW
+// it. Text position uses a fixed nominal half-width offset instead of gfx_measurestr --
+// not pixel-perfect centering, but gfx_measurestr was likely the single largest @gfx
+// cost (called for every label AND value, every widget, every frame -- unlike
+// gfx_setfont this can't be memoized since the value text changes constantly). Playback
+// stuttering while rendering stayed clean is conclusive that @gfx cost was the problem
+// (rendering never calls @gfx at all), so cutting this is the priority over exact
+// centering.
+function draw_knob(cx, cy, r, norm, label, val, fmt) local(ang, tx, ty, scx, scy, scr) (
+  norm = min(max(norm, 0), 1);
+  scx = SX(cx); scy = SY(cy); scr = SZ(r);
+
+  gfx_set(0.75, 0.75, 0.75, 1);
+  set_font(BODY_FONT);
+  gfx_x = scx - SZ(30); gfx_y = scy - scr - SZ(18);
+  gfx_drawstr(label);
+
+  gfx_set(0.08, 0.09, 0.11, 1);
+  gfx_circle(scx, scy, scr, 1, 0);
+  gfx_set(0.33, 0.33, 0.33, 1);
+  gfx_circle(scx, scy, scr, 0, 0);
+  ang = (-135 + norm * 270) * DEG2RAD;
+  tx = scx + sin(ang) * (scr - SZ(7));
+  ty = scy - cos(ang) * (scr - SZ(7));
+  gfx_set(0.3, 0.75, 1, 1);
+  gfx_line(scx, scy, tx, ty);
+
+  sprintf(#kval_str, fmt, val);
+  gfx_set(0.85, 0.85, 0.85, 1);
+  set_font(BODY_FONT);
+  gfx_x = scx - SZ(22); gfx_y = scy + scr + SZ(5);
+  gfx_drawstr(#kval_str);
+);
+
+// state: 0 or 1 (or any value >0.5 counts as "on"). Solid rectangle, grey when off,
+// caller-supplied color when on (yellow for Auto Gain/Bypass/Delta, blue for OS Factor,
+// per the requested grey/yellow and grey/blue schemes). Label drawn INSIDE the button,
+// left-aligned with a small inset rather than centered (consistent with the rest of the
+// UI's fixed-offset text positioning -- no gfx_measurestr in the hot path).
+function draw_button(cx, cy, w, h, state, label, on_r, on_g, on_b) local(scx, scy, scw, sch) (
+  scx = SX(cx); scy = SY(cy); scw = SZ(w); sch = SZ(h);
+  state > 0.5 ? gfx_set(on_r, on_g, on_b, 1) : gfx_set(0.35, 0.35, 0.35, 1);
+  gfx_rect(scx - scw/2, scy - sch/2, scw, sch, 1);
+  gfx_set(0.1, 0.1, 0.1, 1);
+  gfx_rect(scx - scw/2, scy - sch/2, scw, sch, 0);
+  state > 0.5 ? gfx_set(0.05, 0.05, 0.05, 1) : gfx_set(0.85, 0.85, 0.85, 1);
+  set_font(BODY_FONT);
+  gfx_x = scx - scw/2 + SZ(8); gfx_y = scy - SZ(7);
+  gfx_drawstr(label);
+);
+
+// Horizontal slider -- easier throw/movement than the vertical version per feedback.
+// norm: 0..1, left=0/right=1. Center tick at the track's horizontal midpoint -- same
+// "only valid because the range is symmetric" caveat as the vertical version had.
+// lo_lbl/hi_lbl sit at the left/right track ends respectively (left=lo, matching the
+// fill direction). Label above the track, value below -- same vertical language as
+// draw_knob, just built around a horizontal track instead of a circle.
+function draw_hslider(cx, cy, w, norm, label, val, fmt, lo_lbl, hi_lbl) local(thumb_x, scx, scy, scw, hi_tw, hi_th) (
+  scx = SX(cx); scy = SY(cy); scw = SZ(w);
+
+  gfx_set(0.75, 0.75, 0.75, 1);
+  set_font(BODY_FONT);
+  gfx_x = scx - SZ(16); gfx_y = scy - SZ(22);
+  gfx_drawstr(label);
+
+  gfx_set(0.08, 0.09, 0.11, 1);
+  gfx_rect(scx - scw/2, scy - SZ(3), scw, SZ(6), 1);
+  gfx_set(0.33, 0.33, 0.33, 1);
+  gfx_rect(scx - scw/2, scy - SZ(3), scw, SZ(6), 0);
+  gfx_set(0.27, 0.27, 0.27, 1);
+  gfx_line(scx, scy - SZ(7), scx, scy + SZ(7));
+
+  norm = min(max(norm, 0), 1);
+  thumb_x = scx - scw/2 + norm * scw;
+  gfx_set(0.18, 0.61, 0.86, 1);
+  gfx_rect(thumb_x - SZ(4), scy - SZ(9), SZ(8), SZ(18), 1);
+
+  // End labels: left-aligned to the track start, right-aligned to the track end
+  // so longer words ("Transparent" / "Aggressive") stay visually centered on the ends.
+  gfx_set(0.6, 0.6, 0.6, 1);
+  set_font(SMALL_FONT);
+  gfx_x = scx - scw/2; gfx_y = scy + SZ(11);
+  gfx_drawstr(lo_lbl);
+  gfx_measurestr(hi_lbl, hi_tw, hi_th);
+  gfx_x = scx + scw/2 - hi_tw; gfx_y = scy + SZ(11);
+  gfx_drawstr(hi_lbl);
+
+  sprintf(#kval_str, fmt, val);
+  gfx_set(0.85, 0.85, 0.85, 1);
+  set_font(BODY_FONT);
+  gfx_x = scx - SZ(20); gfx_y = scy + SZ(24);
+  gfx_drawstr(#kval_str);
+);
+
+// Vertical meter (Phase 9). invert=0: fills from the BOTTOM up as live_frac/hold_frac
+// increase (True Peak's convention -- its "0" end IS the extreme/loud end, so having it
+// at the top and filling up toward it makes sense). invert=1: fills from the TOP DOWN
+// instead (Character/GR's convention -- their "0" is the neutral/best-case reading, not
+// an extreme, so it sits at top as a reference line with the meter "hanging down" from
+// it as reduction/removal increases -- standard GR-meter convention). Same "more filled
+// = more extreme" logic either way, just which edge is the anchor differs.
+function draw_vmeter(cx, top, w, h, live_frac, hold_frac, r, g, b, invert) local(scx, sctop, scw, sch, fill_h, fill_y, hold_y) (
+  scx = SX(cx); sctop = SY(top); scw = SZ(w); sch = SZ(h);
+  gfx_set(0.08, 0.09, 0.11, 1);
+  gfx_rect(scx - scw/2, sctop, scw, sch, 1);
+  gfx_set(0.35, 0.35, 0.35, 1);
+  gfx_rect(scx - scw/2, sctop, scw, sch, 0);
+  live_frac = min(max(live_frac, 0), 1);
+  hold_frac = min(max(hold_frac, 0), 1);
+  fill_h = live_frac * sch;
+  invert > 0.5 ? (
+    fill_y = sctop;
+    hold_y = sctop + hold_frac * sch;
+  ) : (
+    fill_y = sctop + sch - fill_h;
+    hold_y = sctop + sch - hold_frac * sch;
+  );
+  gfx_set(r, g, b, 1);
+  gfx_rect(scx - scw/2, fill_y, scw, fill_h, 1);
+  gfx_set(1, 1, 1, 1);
+  gfx_rect(scx - scw/2, hold_y - SZ(1), scw, SZ(2), 1);
+);
+
+// Dynamic Range indicator (Phase 12b -- replaces the crosshatch overlay, which read
+// poorly in practice). A single narrow bar, L&R combined into one shared reading, solid
+// fill spanning the LRA-style low_frac to high_frac window (same bottom-anchored
+// orientation as the True Peak bars: higher on screen = louder). No hold marker, no
+// live/current indication -- this widget's entire purpose is the min-to-max SPAN, not
+// an instantaneous reading.
+function draw_range_bar(cx, top, w, h, lo_frac, hi_frac, r, g, b) local(scx, sctop, scw, sch, y_lo, y_hi) (
+  scx = SX(cx); sctop = SY(top); scw = SZ(w); sch = SZ(h);
+  gfx_set(0.08, 0.09, 0.11, 1);
+  gfx_rect(scx - scw/2, sctop, scw, sch, 1);
+  gfx_set(0.35, 0.35, 0.35, 1);
+  gfx_rect(scx - scw/2, sctop, scw, sch, 0);
+  lo_frac = min(max(lo_frac, 0), 1);
+  hi_frac = min(max(hi_frac, 0), 1);
+  y_hi = sctop + sch - hi_frac * sch;
+  y_lo = sctop + sch - lo_frac * sch;
+  y_lo > y_hi ? (
+    gfx_set(r, g, b, 0.9);
+    gfx_rect(scx - scw/2, y_hi, scw, y_lo - y_hi, 1);
+  );
+);
+
+// Text convenience -- design-space x/y, scaled font, no manual SX/SY/set_font trio at
+// every call site. ALWAYS sets its own color explicitly (r,g,b) -- it used to inherit
+// whatever gfx_set() call happened to run last, which broke as soon as anything
+// (like the True Peak Over dot's color logic) was drawn between two draw_text calls.
+// Text color should never depend on draw order.
+function draw_text(x, y, size, r, g, b, str) (
+  gfx_set(r, g, b, 1);
+  set_font(size);
+  gfx_x = SX(x); gfx_y = SY(y);
+  gfx_drawstr(str);
+);
+
+// Shared group-panel background + label, same treatment for every section (Input,
+// Character, Limiter, Utility, Sidechain EQ, and all three meter columns).
+function draw_group(x, y, w, h, label) local(sx, sy, sw, sh) (
+  sx = SX(x); sy = SY(y); sw = SZ(w); sh = SZ(h);
+  gfx_set(0.10, 0.15, 0.19, 0.8);
+  gfx_rect(sx, sy, sw, sh, 1);
+  gfx_set(0.16, 0.29, 0.42, 1);
+  gfx_rect(sx, sy, sw, sh, 0);
+  gfx_set(0.44, 0.66, 0.81, 1);
+  set_font(GROUP_FONT);
+  gfx_x = sx + SZ(8); gfx_y = sy + SZ(6);
+  gfx_drawstr(label);
+);
+
+// ==========================================================================================
+// Mouse interaction engine (Phase 13). Control IDs are the slider numbers directly (2,3,
+// 5-12) -- no separate ID-to-slider lookup table needed, and it keeps commit_edit_value()
+// below traceable against the slider list at a glance. drag_ctrl/edit_ctrl use -1 as "none
+// active" (0 is a valid slider-adjacent number, so it's not a safe sentinel here).
+// mouse_cap bits (confirmed against REAPER's own gfx documentation): 1=LMB, 2=RMB,
+// 4=Ctrl/Cmd, 8=Shift, 16=Alt, 32=Win. Every interact function returns the (possibly
+// updated) value and sets the shared interact_changed flag so the caller knows whether to
+// call slider_automate() -- calling it unconditionally every frame would spam spurious
+// automation writes.
+// ==========================================================================================
+
+// norm: 0..1 already-normalized value. Vertical drag: up increases, down decreases.
+// Sensitivity is expressed as "fraction of full range per pixel dragged" -- 1/250 normal
+// (a ~250px drag spans the control's whole range), 1/2000 with Shift held (8x finer).
+// Ctrl/Cmd+click opens the text-entry box instead of starting a drag. Double-click
+// (same control, <400ms apart) resets to dflt instead of starting a drag.
+function knob_interact(id, cx, cy, r, val, vmin, vmax, dflt) local(scx, scy, scr, dx, dy, dist, is_down, was_down, dbl, sens, new_val) (
+  interact_changed = 0;
+  scx = SX(cx); scy = SY(cy); scr = SZ(r);
+  is_down = mouse_cap & 1;
+  was_down = last_mouse_cap & 1;
+
+  (edit_ctrl < 0) && is_down && !was_down ? (
+    dx = mouse_x - scx; dy = mouse_y - scy;
+    dist = sqrt(dx*dx + dy*dy);
+    dist <= scr + SZ(4) ? (
+      mouse_cap & 4 ? (
+        edit_ctrl = id;
+        edit_x = scx; edit_y = scy;
+        #edit_str = "";
+      ) : (
+        dbl = (last_click_ctrl == id) && (time_precise() - last_click_time < 0.4);
+        dbl ? (
+          val = dflt;
+          interact_changed = 1;
+          last_click_ctrl = -1;
+        ) : (
+          drag_ctrl = id;
+          drag_start_y = mouse_y;
+          drag_start_val = val;
+          last_click_time = time_precise();
+          last_click_ctrl = id;
+        );
+      );
+    );
+  ) : drag_ctrl == id ? (
+    is_down ? (
+      sens = (mouse_cap & 8) ? (1/2000) : (1/250);
+      new_val = drag_start_val + (drag_start_y - mouse_y) * sens * (vmax - vmin);
+      new_val = min(max(new_val, vmin), vmax);
+      new_val != val ? interact_changed = 1;
+      val = new_val;
+    ) : (
+      drag_ctrl = -1;
+    );
+  );
+  val;
+);
+
+// Horizontal slider: click ANYWHERE on the track jumps directly to that position
+// (conventional slider behavior, unlike the knob's relative-drag-only). Continued drag
+// tracks the mouse directly; Shift damps movement toward the mapped position instead of
+// snapping straight to it, for fine control. Same Ctrl+click-to-edit and
+// double-click-to-reset as the knob.
+function hslider_interact(id, cx, cy, w, val, vmin, vmax, dflt) local(scx, scy, scw, is_down, was_down, dbl, frac, mapped) (
+  interact_changed = 0;
+  scx = SX(cx); scy = SY(cy); scw = SZ(w);
+  is_down = mouse_cap & 1;
+  was_down = last_mouse_cap & 1;
+
+  (edit_ctrl < 0) && is_down && !was_down ? (
+    (abs(mouse_x - scx) <= scw/2 + SZ(4)) && (abs(mouse_y - scy) <= SZ(16)) ? (
+      mouse_cap & 4 ? (
+        edit_ctrl = id;
+        edit_x = scx; edit_y = scy;
+        #edit_str = "";
+      ) : (
+        dbl = (last_click_ctrl == id) && (time_precise() - last_click_time < 0.4);
+        dbl ? (
+          val = dflt;
+          interact_changed = 1;
+          last_click_ctrl = -1;
+        ) : (
+          drag_ctrl = id;
+          last_click_time = time_precise();
+          last_click_ctrl = id;
+          frac = min(max((mouse_x - (scx - scw/2)) / scw, 0), 1);
+          val = vmin + frac * (vmax - vmin);
+          interact_changed = 1;
+        );
+      );
+    );
+  ) : drag_ctrl == id ? (
+    is_down ? (
+      frac = min(max((mouse_x - (scx - scw/2)) / scw, 0), 1);
+      mapped = vmin + frac * (vmax - vmin);
+      mouse_cap & 8 ? (
+        val += (mapped - val) * 0.08;
+      ) : (
+        val = mapped;
+      );
+      interact_changed = 1;
+    ) : (
+      drag_ctrl = -1;
+    );
+  );
+  val;
+);
+
+// Simple click-toggle button (Auto Gain, Bypass, Delta). No double-click, no text-entry --
+// a toggle only has two states, neither of those mechanisms applies.
+function button_interact(id, cx, cy, w, h, state) local(scx, scy, scw, sch, is_down, was_down) (
+  interact_changed = 0;
+  scx = SX(cx); scy = SY(cy); scw = SZ(w); sch = SZ(h);
+  is_down = mouse_cap & 1;
+  was_down = last_mouse_cap & 1;
+  (edit_ctrl < 0) && is_down && !was_down ? (
+    (abs(mouse_x - scx) <= scw/2) && (abs(mouse_y - scy) <= sch/2) ? (
+      state = state > 0.5 ? 0 : 1;
+      interact_changed = 1;
+    );
+  );
+  state;
+);
+
+// Mutually-exclusive radio button (OS Factor's 2x/4x pair). my_val is this button's own
+// value (0 or 1); clicking sets current_val to my_val regardless of its prior state --
+// unlike button_interact, this never toggles off by clicking the ALREADY-active button.
+function radio_button_interact(id, cx, cy, w, h, my_val, current_val) local(scx, scy, scw, sch, is_down, was_down) (
+  interact_changed = 0;
+  scx = SX(cx); scy = SY(cy); scw = SZ(w); sch = SZ(h);
+  is_down = mouse_cap & 1;
+  was_down = last_mouse_cap & 1;
+  (edit_ctrl < 0) && is_down && !was_down ? (
+    (abs(mouse_x - scx) <= scw/2) && (abs(mouse_y - scy) <= sch/2) ? (
+      current_val != my_val ? interact_changed = 1;
+      current_val = my_val;
+    );
+  );
+  current_val;
+);
+
+// Dispatch table for committing a typed value -- id is the slider number, matching the
+// slider declarations at the top of the file exactly. Each branch clamps to that
+// control's real range before assigning, same as the drag path already does, and calls
+// slider_automate() with the literal sliderN token REAPER requires (a variable holding
+// the number does not work here -- confirmed the hard way on earlier plugins). Defined
+// BEFORE handle_text_edit() below, which calls it -- EEL2 only allows a function to call
+// functions already declared earlier in the file, not later ones.
+function commit_edit_value(id, v) (
+  id == 2 ? ( threshold_db = min(max(v, -24), 0); slider_automate(slider2); );
+  id == 3 ? ( character = min(max(v, 0), 100); slider_automate(slider3); );
+  id == 5 ? ( ceiling_db = min(max(v, -18), 0); slider_automate(slider5); );
+  id == 6 ? ( lookahead_ms = min(max(v, 0.5), 20); slider_automate(slider6); );
+  id == 7 ? ( release_pct = min(max(v, 0), 100); slider_automate(slider7); );
+  id == 8 ? ( input_gain_db = min(max(v, 0), 24); slider_automate(slider8); );
+  id == 9 ? ( output_ceiling_db = min(max(v, -3), 0); slider_automate(slider9); );
+  id == 10 ? ( link_pct = min(max(v, 0), 100); slider_automate(slider10); );
+  id == 11 ? ( sc_low_shelf_db = min(max(v, -6), 6); slider_automate(slider11); );
+  id == 12 ? ( sc_high_shelf_db = min(max(v, -6), 6); slider_automate(slider12); );
+);
+
+// Text-entry box (Phase 13) -- gfx has no native textbox, built from scratch: accumulates
+// keystrokes into #edit_str, Enter commits (parsed via match()'s %f matcher, REAPER
+// EEL2's built-in string-to-number parser), Escape cancels, Backspace trims the last
+// character via strcpy_substr's negative-maxlen truncation. gfx_getchar() is called every
+// frame unconditionally (not just while editing) because REAPER's own docs note this is
+// required for mouse_cap to correctly reflect keyboard modifiers when the mouse isn't
+// captured -- the Shift/Ctrl checks in the interact functions above depend on that.
+function handle_text_edit() local(ch, parsed) (
+  ch = gfx_getchar();
+  edit_ctrl >= 0 ? (
+    ch == 13 ? (
+      match("%f", #edit_str, parsed) ? commit_edit_value(edit_ctrl, parsed);
+      edit_ctrl = -1;
+    ) : ch == 27 ? (
+      edit_ctrl = -1;
+    ) : ch == 8 ? (
+      strlen(#edit_str) > 0 ? strcpy_substr(#edit_str, #edit_str, 0, -1);
+    ) : ((ch >= '0' && ch <= '9') || ch == '.' || ch == '-') ? (
+      strlen(#edit_str) < 10 ? str_setchar(#edit_str, strlen(#edit_str), ch);
+    );
+  );
+);
+
+// Draws the text-entry box, on top of everything else -- called once at the very end of
+// @gfx, after all controls, so it's never drawn under something else.
+function draw_edit_box() local(lw, lh) (
+  edit_ctrl >= 0 ? (
+    gfx_set(0.05, 0.05, 0.05, 1);
+    gfx_rect(edit_x - SZ(45), edit_y - SZ(14), SZ(90), SZ(28), 1);
+    gfx_set(1, 0.82, 0.15, 1);
+    gfx_rect(edit_x - SZ(45), edit_y - SZ(14), SZ(90), SZ(28), 0);
+    gfx_set(1, 1, 1, 1);
+    set_font(BODY_FONT);
+    gfx_x = edit_x - SZ(38); gfx_y = edit_y - SZ(8);
+    gfx_drawstr(#edit_str);
+    gfx_drawstr("_");
+  );
+);
+
+
+function clear_buf(bufptr, len) local(i) (
+  i = 0;
+  while (i < len) (
+    bufptr[i] = 0;
+    i += 1;
+  );
+);
+
+hist_wpos = 0;
+wpos_down = 0;
+wpos_char = 0;
+
+function compute_coeffs(factor_val, ntaps_val) local(n, m, center, sinc_val, window, sum, twopi, fc) (
+  twopi = 2*$pi;
+  fc = 1 / (2*factor_val);
+  center = (ntaps_val - 1) / 2;
+  sum = 0;
+  n = 0;
+  while (n < ntaps_val) (
+    m = n - center;
+    sinc_val = (abs(m) < 0.5) ? (2*fc) : (sin(twopi*fc*m) / ($pi*m));
+    window = 0.42 - 0.5*cos(twopi*n/(ntaps_val-1)) + 0.08*cos(2*twopi*n/(ntaps_val-1));
+    coeffs[n] = sinc_val * window;
+    sum += coeffs[n];
+    n += 1;
+  );
+  n = 0;
+  while (n < ntaps_val) (
+    coeffs[n] /= sum;
+    n += 1;
+  );
+);
+
+function poly_up(histptr, coeffptr, base_pos, phase, factor_val, ntaps_val) local(i, sum, tap_idx) (
+  sum = 0;
+  i = 0;
+  tap_idx = phase;
+  while (tap_idx < ntaps_val) (
+    sum += coeffptr[tap_idx] * histptr[base_pos - i];
+    tap_idx += factor_val;
+    i += 1;
+  );
+  sum;
+);
+
+function down_push(bufptr, wpos, val, ntaps_val) (
+  bufptr[wpos] = val;
+  bufptr[wpos + ntaps_val] = val;
+);
+
+function down_convolve(bufptr, coeffptr, wpos, ntaps_val) local(i, sum, rs) (
+  rs = wpos + 1;
+  sum = 0;
+  i = 0;
+  while (i < ntaps_val) (
+    sum += coeffptr[i] * bufptr[rs + i];
+    i += 1;
+  );
+  sum;
+);
+
+// Retroactively marks flag_buf[start_pos .. end_pos_exclusive) with flag_val, wrapping
+// through the circular buffer as needed.
+function mark_excursion(flag_buf, start_pos, end_pos_exclusive, buf_size, flag_val) local(k) (
+  k = start_pos;
+  while (k != end_pos_exclusive) (
+    flag_buf[k] = flag_val;
+    k = (k + 1) % buf_size;
+  );
+);
+
+// Character's per-tick processing for one channel. Read-before-write, same delay
+// guarantee as Phase 1's circ_delay (buf_size samples of delay, exactly). Excursion
+// tracking happens on detect_val (sidechain-filtered, NEW) rather than the raw audio --
+// the actual audio_val is still what gets buffered, output, and clipped against the
+// unfiltered threshold. The OUTGOING (evicted) sample's clip flag was already finalized
+// by the time it's read, guaranteed by CHAR_MARGIN_BASE's sizing.
+function char_process(audio_buf, flag_buf, state, wpos, buf_size, thresh_lin, dur_thresh, audio_val, detect_val) local(abs_val, out_audio, out_flag) (
+  out_audio = audio_buf[wpos];
+  out_flag = flag_buf[wpos];
+
+  abs_val = abs(detect_val);
+  abs_val > thresh_lin ? (
+    state[0] == 0 ? (
+      state[0] = 1;
+      state[1] = wpos;
+      state[2] = 0;
+    );
+    state[2] += 1;
+  ) : (
+    state[0] == 1 ? (
+      state[2] < dur_thresh ? (
+        mark_excursion(flag_buf, state[1], wpos, buf_size, 1);
+      );
+      state[0] = 0;
+    );
+  );
+
+  audio_buf[wpos] = audio_val;
+  flag_buf[wpos] = 0; // default: pass through, unless retroactively marked while buffered
+
+  out_flag > 0.5 ? (
+    out_audio > thresh_lin ? out_audio = thresh_lin;
+    out_audio < -thresh_lin ? out_audio = -thresh_lin;
+  );
+
+  out_audio;
+);
+
+// Plain delay, no clip logic -- used for the dry (Listen Mode) path so it matches
+// Character's own buffer length exactly, without any of the clip decision machinery.
+function bare_delay(bufptr, wpos, val) local(out) (
+  out = bufptr[wpos];
+  bufptr[wpos] = val;
+  out;
+);
+
+// Standard biquad, Direct Form I. state: [0]=x1 [1]=x2 [2]=y1 [3]=y2
+function biquad_process(state, x, b0, b1, b2, a1, a2) local(y) (
+  y = b0*x + b1*state[0] + b2*state[1] - a1*state[2] - a2*state[3];
+  // Only the y-feedback path (state[2]/state[3]) can sustain a slow decay toward zero in
+  // silence -- state[0]/state[1] are just delayed copies of real input, never denormal-prone
+  // on their own -- so flushing y before it's stored is sufficient protection.
+  y = dn(y);
+  state[1] = state[0]; state[0] = x;
+  state[3] = state[2]; state[2] = y;
+  y;
+);
+
+// RBJ Audio EQ Cookbook shelf formulas (the standard, widely-used reference for these
+// filter types) -- S=1 (a conventional, moderately steep shelf slope, not user-exposed).
+// At gain_db=0, A=1 and these reduce to unity/identity by construction, same as Character
+// at Duration=0 or Link at 0% -- inert until you actually move the control.
+function compute_low_shelf(coef, freq, gain_db, srate_val) local(A, w0, cw, sw, alpha, sqrtA, b0, b1, b2, a0, a1, a2) (
+  A = 10^(gain_db/40);
+  w0 = 2*$pi*freq/srate_val;
+  cw = cos(w0); sw = sin(w0);
+  sqrtA = sqrt(A);
+  alpha = sw/2 * sqrt((A + 1/A)*(1/1 - 1) + 2);
+
+  b0 =    A*((A+1) - (A-1)*cw + 2*sqrtA*alpha);
+  b1 =  2*A*((A-1) - (A+1)*cw);
+  b2 =    A*((A+1) - (A-1)*cw - 2*sqrtA*alpha);
+  a0 =        (A+1) + (A-1)*cw + 2*sqrtA*alpha;
+  a1 =   -2*((A-1) + (A+1)*cw);
+  a2 =        (A+1) + (A-1)*cw - 2*sqrtA*alpha;
+
+  coef[0] = b0/a0; coef[1] = b1/a0; coef[2] = b2/a0; coef[3] = a1/a0; coef[4] = a2/a0;
+);
+
+function compute_high_shelf(coef, freq, gain_db, srate_val) local(A, w0, cw, sw, alpha, sqrtA, b0, b1, b2, a0, a1, a2) (
+  A = 10^(gain_db/40);
+  w0 = 2*$pi*freq/srate_val;
+  cw = cos(w0); sw = sin(w0);
+  sqrtA = sqrt(A);
+  alpha = sw/2 * sqrt((A + 1/A)*(1/1 - 1) + 2);
+
+  b0 =    A*((A+1) + (A-1)*cw + 2*sqrtA*alpha);
+  b1 = -2*A*((A-1) + (A+1)*cw);
+  b2 =    A*((A+1) + (A-1)*cw - 2*sqrtA*alpha);
+  a0 =        (A+1) - (A-1)*cw + 2*sqrtA*alpha;
+  a1 =    2*((A-1) - (A+1)*cw);
+  a2 =        (A+1) - (A-1)*cw - 2*sqrtA*alpha;
+
+  coef[0] = b0/a0; coef[1] = b1/a0; coef[2] = b2/a0; coef[3] = a1/a0; coef[4] = a2/a0;
+);
+
+// Cascaded low-shelf then high-shelf -- one call per channel per detection point.
+function sc_filter(low_state, high_state, low_coef, high_coef, x) local(y1) (
+  y1 = biquad_process(low_state, x, low_coef[0], low_coef[1], low_coef[2], low_coef[3], low_coef[4]);
+  biquad_process(high_state, y1, high_coef[0], high_coef[1], high_coef[2], high_coef[3], high_coef[4]);
+);
+
+// BS.1770-ish K-weighting coefficients at the host sample rate (not OS rate).
+// Stage 1: high-shelf style pre-filter; Stage 2: highpass. Close enough for a
+// guidance meter; not a certified loudness meter.
+function compute_lufs_kweight_coefs(srate_val) local(pi_v, w0, sw, cw, a_h, a_b, b0, b1, b2, a0, a1, a2) (
+  pi_v = 3.141592653589793;
+
+  // Stage 1 — high shelf approx (+4 dB shelf around 1.5 kHz region, simplified)
+  w0 = 2 * pi_v * 1681.0 / srate_val;
+  sw = sin(w0); cw = cos(w0);
+  a_h = sw / 2 * sqrt(2);
+  b0 = (1 + sqrt(2)*sw/2 + (sw*sw)/2) ; // will normalize
+  // Use RBJ high-shelf with +3.999 dB at 1681 Hz (common BS.1770 stage-1 approximation)
+  compute_high_shelf(lufs_kw1_coef, 1681.0, 3.999, srate_val);
+
+  // Stage 2 — highpass ~38 Hz (RBJ)
+  w0 = 2 * pi_v * 38.0 / srate_val;
+  sw = sin(w0); cw = cos(w0);
+  a_b = sw / (2 * 0.5); // Q=0.5
+  b0 =  (1 + cw) / 2;
+  b1 = -(1 + cw);
+  b2 =  (1 + cw) / 2;
+  a0 =  1 + a_b;
+  a1 = -2 * cw;
+  a2 =  1 - a_b;
+  lufs_kw2_coef[0] = b0 / a0;
+  lufs_kw2_coef[1] = b1 / a0;
+  lufs_kw2_coef[2] = b2 / a0;
+  lufs_kw2_coef[3] = a1 / a0;
+  lufs_kw2_coef[4] = a2 / a0;
+);
+
+function lufs_kweight(kw1_state, kw2_state, x) local(y1) (
+  y1 = biquad_process(kw1_state, x, lufs_kw1_coef[0], lufs_kw1_coef[1], lufs_kw1_coef[2], lufs_kw1_coef[3], lufs_kw1_coef[4]);
+  biquad_process(kw2_state, y1, lufs_kw2_coef[0], lufs_kw2_coef[1], lufs_kw2_coef[2], lufs_kw2_coef[3], lufs_kw2_coef[4]);
+);
+
+// Limiter gain COMPUTER only -- no audio/buffer involvement. Returns the updated
+// gr_smoothed_db for this channel; state[0]/state[1] persist gr_smoothed_db/gr_history_db
+// across calls. Split from the delay+apply step so Link can blend both channels'
+// independently-computed GR together before either is actually applied to audio.
+function limiter_compute_gr(state, val, ceiling_db, attack_coeff, history_attack_coeff, history_decay_coeff, release_fast_ms, release_slow_ms, history_ref_db, os_rate)
+  local(abs_val, level_db, gr_target_db, gr_smoothed_db, gr_history_db, history_norm, release_ms_current, release_coeff) (
+
+  abs_val = abs(val);
+  level_db = 20 * log(max(abs_val, 0.0000000001)) / LN10;
+  gr_target_db = min(0, ceiling_db - level_db);
+
+  gr_smoothed_db = state[0];
+  gr_history_db = state[1];
+
+  history_norm = min(max(gr_history_db / history_ref_db, 0), 1);
+  release_ms_current = release_fast_ms + (release_slow_ms - release_fast_ms) * history_norm;
+  release_coeff = 1 - exp(-1 / (release_ms_current * 0.001 * os_rate));
+
+  gr_target_db < gr_smoothed_db ? (
+    gr_smoothed_db += (gr_target_db - gr_smoothed_db) * attack_coeff;
+  ) : (
+    gr_smoothed_db += (gr_target_db - gr_smoothed_db) * release_coeff;
+  );
+
+  gr_smoothed_db < gr_history_db ? (
+    gr_history_db += (gr_smoothed_db - gr_history_db) * history_attack_coeff;
+  ) : (
+    gr_history_db += (gr_smoothed_db - gr_history_db) * history_decay_coeff;
+  );
+
+  gr_smoothed_db = dn(gr_smoothed_db);
+  gr_history_db = dn(gr_history_db);
+  state[0] = gr_smoothed_db;
+  state[1] = gr_history_db;
+
+  gr_smoothed_db;
+);
+
+// Delay + apply a given (possibly Link-blended) gain reduction in dB to this channel's
+// audio. Read-before-write, same buf_size-sample delay guarantee as everything else.
+function limiter_apply(la_buf, wpos, val, gr_db) local(delayed, gr_linear) (
+  delayed = la_buf[wpos];
+  la_buf[wpos] = val;
+  gr_linear = 10^(gr_db/20);
+  delayed * gr_linear;
+);
+
+// Peak-follower level tracker on both dry and processed signals (fast attack catches the
+// actual peak, slower release holds a "recent peak" estimate), ratio applied as makeup
+// gain. This replaces an earlier average-level (mean |x|) version that measured the wrong
+// thing: Character can shave real peak level off frequent short excursions while barely
+// denting the signal's average level, since each clip event is brief relative to the
+// whole waveform -- so an average-level tracker saw almost no change even when peak
+// headroom was genuinely being bought. Peak tracking is what actually needs restoring
+// before the Limiter, since it's peak level driving the Limiter's own detector.
+// Clamped to never reduce gain and capped as a safety margin.
+// min_gain_db/max_gain_db: caller-supplied clamp (was hardcoded to [1, 10^(12/20)] before
+// Phase 11 -- now generalized since this exact peak-ratio-and-clamp mechanism is reused
+// for the full-chain Auto Gain below). Character's own Auto Makeup Gain still passes
+// min_gain_db=0 (never attenuate, only restore what Character itself took). The
+// full-chain Auto Gain needs a much lower floor -- it has to be able to REDUCE gain too,
+// not just add it, or it can never pull the output back down when Drive alone (with no
+// GR to counteract it) makes the processed signal louder than the dry reference.
+function apply_makeup(state, dry_val, char_val, attack_coeff, release_coeff, min_gain_db, max_gain_db) local(dry_abs, char_abs, peak_dry, peak_char, gain_lin) (
+  dry_abs = abs(dry_val);
+  char_abs = abs(char_val);
+
+  peak_dry = state[0];
+  dry_abs > peak_dry ? (
+    peak_dry += (dry_abs - peak_dry) * attack_coeff;
+  ) : (
+    peak_dry += (dry_abs - peak_dry) * release_coeff;
+  );
+
+  peak_char = state[1];
+  char_abs > peak_char ? (
+    peak_char += (char_abs - peak_char) * attack_coeff;
+  ) : (
+    peak_char += (char_abs - peak_char) * release_coeff;
+  );
+
+  state[0] = dn(peak_dry);
+  state[1] = dn(peak_char);
+
+  gain_lin = peak_dry / max(peak_char, 0.0000001);
+  gain_lin = min(max(gain_lin, 10^(min_gain_db/20)), 10^(max_gain_db/20));
+  char_val * gain_lin;
+);
+
+function reconfigure(new_os_choice, new_lookahead_ms) local(oc) (
+  oc = new_os_choice;
+  oc == 0 ? factor = 2 : factor = 4;
+  ntaps = DELAY_SAMPLES_BASE * factor + 1;
+  compute_coeffs(factor, ntaps);
+  os_rate = srate * factor;
+
+  // CHAR_MAX_MS is a fixed constant (Phase 8) -- CHAR_BUDGET_BASE no longer depends on
+  // any slider, only srate, but still needs recomputing here since factor (and therefore
+  // char_buf_size) changes with Oversampling Factor.
+  CHAR_BUDGET_BASE = ceil(CHAR_MAX_MS * 0.001 * srate) + CHAR_MARGIN_BASE;
+  char_buf_size = CHAR_BUDGET_BASE * factor; // exact multiple of factor, by construction
+
+  LA_BUDGET_BASE = ceil(new_lookahead_ms * 0.001 * srate);
+  la_buf_size = LA_BUDGET_BASE * factor;
+
+  // Fixed (non-history-dependent) limiter coefficients, recomputed only when factor
+  // changes since they depend on the oversampled rate.
+  ATTACK_MS = 1;
+  HISTORY_ATTACK_MS = 15;
+  HISTORY_DECAY_MS = 500;
+  attack_coeff = 1 - exp(-1 / (ATTACK_MS * 0.001 * os_rate));
+  history_attack_coeff = 1 - exp(-1 / (HISTORY_ATTACK_MS * 0.001 * os_rate));
+  history_decay_coeff = 1 - exp(-1 / (HISTORY_DECAY_MS * 0.001 * os_rate));
+
+  // Click-free parameter smoothing (Phase 7) -- one shared time constant for every
+  // smoothed control (Input Gain, Threshold, Ceiling, True Peak Output Ceiling, both
+  // Sidechain Shelf gains). Base rate, not oversampled -- this only needs to be fast
+  // enough that a slider move doesn't produce an audible step, not tied to anti-aliasing.
+  PARAM_SMOOTH_MS = 15;
+  param_smooth_coeff = 1 - exp(-1 / (PARAM_SMOOTH_MS * 0.001 * srate));
+
+  MAKEUP_PEAK_ATTACK_MS = 5;   // fast enough to catch real peaks, not instant/jittery
+  MAKEUP_PEAK_RELEASE_MS = 300; // holds a "recent peak" estimate; adapts across a song
+                                 // without pumping on every individual cycle
+  makeup_attack_coeff = 1 - exp(-1 / (MAKEUP_PEAK_ATTACK_MS * 0.001 * os_rate));
+  makeup_release_coeff = 1 - exp(-1 / (MAKEUP_PEAK_RELEASE_MS * 0.001 * os_rate));
+
+  // GR meter display smoothing -- fast catch, slow decay, standard GR meter ballistics.
+  // Base-rate (not oversampled), since the display only updates once per @sample block.
+  METER_DECAY_MS = 400;
+  meter_decay_coeff = 1 - exp(-1 / (METER_DECAY_MS * 0.001 * srate));
+
+  // Peak-hold markers (Phase 8b) -- 1 second hold, then a 20 dB/sec fall, standard VU
+  // peak-fall pacing. Base-rate, updated once per host sample alongside the meters
+  // themselves.
+  PEAK_HOLD_TIME_MS = 1000;
+  PEAK_HOLD_FALL_DB_PER_SEC = 20;
+  PEAK_HOLD_TIME_SAMPLES = ceil(PEAK_HOLD_TIME_MS * 0.001 * srate);
+  PEAK_HOLD_FALL_PER_SAMPLE_DB = PEAK_HOLD_FALL_DB_PER_SEC / srate;
+
+  // Dynamic Range tracker (Phase 12d) -- proper envelope-follower ballistics, not
+  // peak-hold. 3s attack means a <1s pause simply can't travel far before the pause
+  // ends and level returns -- this is what actually fixes brief stops bottoming out,
+  // not just the LRA_GATE_DB threshold below (gating alone doesn't help once genuine
+  // above-gate material is decaying THROUGH the gate on its way down, which still
+  // registered as a real reading under the old peak-hold approach). 16s release means
+  // the recent ceiling/floor doesn't evaporate the instant a section ends, giving a
+  // genuinely smooth "recent loudness range" reading instead of the old
+  // instant-jump-then-linear-fall shape. Doubled from the first pass (was 1.5s/8s) per
+  // feedback that the reading should adapt more slowly.
+  LRA_MAX_ATTACK_MS = 3000;
+  LRA_MAX_RELEASE_MS = 16000;
+  LRA_MIN_ATTACK_MS = 3000;
+  LRA_MIN_RELEASE_MS = 16000;
+  lra_max_attack_coeff = 1 - exp(-1 / (LRA_MAX_ATTACK_MS * 0.001 * srate));
+  lra_max_release_coeff = 1 - exp(-1 / (LRA_MAX_RELEASE_MS * 0.001 * srate));
+  lra_min_attack_coeff = 1 - exp(-1 / (LRA_MIN_ATTACK_MS * 0.001 * srate));
+  lra_min_release_coeff = 1 - exp(-1 / (LRA_MIN_RELEASE_MS * 0.001 * srate));
+
+  // True Peak meter (Phase 8): fast attack/slow release peak follower, same shape as
+  // Auto Makeup Gain's own peak tracker -- but unlike that tracker, this one decays
+  // toward the LIVE level (not toward 0), since a peak meter's rest state is whatever
+  // the signal's actually doing right now, not a fixed reference. Runs at os_rate since
+  // it needs to catch true peaks within the oversampled domain, not just once per host
+  // sample. (Over indicator no longer has its own separate hold/decay -- it's driven
+  // directly by tp_hold_L/R now, which already has the peak-hold ballistics built in.)
+  TP_ATTACK_MS = 1;
+  TP_RELEASE_MS = 400;
+  tp_attack_coeff = 1 - exp(-1 / (TP_ATTACK_MS * 0.001 * os_rate));
+  tp_release_coeff = 1 - exp(-1 / (TP_RELEASE_MS * 0.001 * os_rate));
+
+  compute_low_shelf(sc_low_coef, SC_PIVOT_HZ, sc_low_shelf_db, os_rate);
+  compute_high_shelf(sc_high_coef, SC_PIVOT_HZ, sc_high_shelf_db, os_rate);
+
+  // Short-term LUFS (~3 s energy window at host rate)
+  compute_lufs_kweight_coefs(srate);
+  LUFS_ST_SEC = 3.0;
+  lufs_ms_coeff = 1 - exp(-1 / (LUFS_ST_SEC * srate));
+  lufs_ms_env[0] = 0;
+  lufs_st_db = -70;
+  lufs_kw1_L[0]=0; lufs_kw1_L[1]=0; lufs_kw1_L[2]=0; lufs_kw1_L[3]=0;
+  lufs_kw2_L[0]=0; lufs_kw2_L[1]=0; lufs_kw2_L[2]=0; lufs_kw2_L[3]=0;
+  lufs_kw1_R[0]=0; lufs_kw1_R[1]=0; lufs_kw1_R[2]=0; lufs_kw1_R[3]=0;
+  lufs_kw2_R[0]=0; lufs_kw2_R[1]=0; lufs_kw2_R[2]=0; lufs_kw2_R[3]=0;
+
+  hist_wpos = 0;
+  wpos_down = 0;
+  wpos_char = 0;
+  wpos_la = 0;
+  clear_buf(raw_histL, 2*RAW_HIST_LEN);
+  clear_buf(raw_histR, 2*RAW_HIST_LEN);
+  clear_buf(down_bufL, 2*MAX_NTAPS);
+  clear_buf(down_bufR, 2*MAX_NTAPS);
+  clear_buf(char_audioL, CHAR_BUF_ALLOC);
+  clear_buf(char_audioR, CHAR_BUF_ALLOC);
+  clear_buf(char_flagL, CHAR_BUF_ALLOC);
+  clear_buf(char_flagR, CHAR_BUF_ALLOC);
+  clear_buf(char_dry_bufL, CHAR_BUF_ALLOC);
+  clear_buf(char_dry_bufR, CHAR_BUF_ALLOC);
+  clear_buf(down_dry_bufL, 2*MAX_NTAPS);
+  clear_buf(down_dry_bufR, 2*MAX_NTAPS);
+  clear_buf(down_dry_raw_bufL, 2*MAX_NTAPS);
+  clear_buf(down_dry_raw_bufR, 2*MAX_NTAPS);
+  clear_buf(la_bufL, LA_BUF_ALLOC);
+  clear_buf(la_bufR, LA_BUF_ALLOC);
+  clear_buf(la_dry_bufL, LA_BUF_ALLOC);
+  clear_buf(la_dry_bufR, LA_BUF_ALLOC);
+  clear_buf(la_dry_raw_bufL, LA_BUF_ALLOC);
+  clear_buf(la_dry_raw_bufR, LA_BUF_ALLOC);
+  clear_buf(charonly_la_bufL, LA_BUF_ALLOC);
+  clear_buf(charonly_la_bufR, LA_BUF_ALLOC);
+  char_stateL[0] = 0; char_stateL[1] = 0; char_stateL[2] = 0;
+  char_stateR[0] = 0; char_stateR[1] = 0; char_stateR[2] = 0;
+  la_stateL[0] = 0; la_stateL[1] = 0;
+  la_stateR[0] = 0; la_stateR[1] = 0;
+  makeup_stateL[0] = 0; makeup_stateL[1] = 0;
+  makeup_stateR[0] = 0; makeup_stateR[1] = 0;
+  full_gain_stateL[0] = 0; full_gain_stateL[1] = 0;
+  full_gain_stateR[0] = 0; full_gain_stateR[1] = 0;
+  delta_gain_stateL[0] = 0; delta_gain_stateL[1] = 0;
+  delta_gain_stateR[0] = 0; delta_gain_stateR[1] = 0;
+  disp_gr_L = 0;
+  disp_gr_R = 0;
+  tp_disp_L = -60;
+  tp_disp_R = -60;
+  tp_over_yellow_L = 0;
+  tp_over_yellow_R = 0;
+  tp_over_red_L = 0;
+  tp_over_red_R = 0;
+  char_disp_L = 0;
+  char_disp_R = 0;
+  gr_hold_stateL[0] = 0;   gr_hold_stateL[1] = 0;
+  gr_hold_stateR[0] = 0;   gr_hold_stateR[1] = 0;
+  tp_hold_stateL[0] = -60; tp_hold_stateL[1] = 0;
+  tp_hold_stateR[0] = -60; tp_hold_stateR[1] = 0;
+  char_hold_stateL[0] = 0; char_hold_stateL[1] = 0;
+  char_hold_stateR[0] = 0; char_hold_stateR[1] = 0;
+  tp_lra_max_stateL[0] = 0; tp_lra_max_stateL[1] = 0;
+  tp_lra_max_stateR[0] = 0; tp_lra_max_stateR[1] = 0;
+  tp_lra_min_stateL[0] = 0; tp_lra_min_stateL[1] = 0;
+  tp_lra_min_stateR[0] = 0; tp_lra_min_stateR[1] = 0;
+  sc_char_low_stateL[0]=0; sc_char_low_stateL[1]=0; sc_char_low_stateL[2]=0; sc_char_low_stateL[3]=0;
+  sc_char_low_stateR[0]=0; sc_char_low_stateR[1]=0; sc_char_low_stateR[2]=0; sc_char_low_stateR[3]=0;
+  sc_char_high_stateL[0]=0; sc_char_high_stateL[1]=0; sc_char_high_stateL[2]=0; sc_char_high_stateL[3]=0;
+  sc_char_high_stateR[0]=0; sc_char_high_stateR[1]=0; sc_char_high_stateR[2]=0; sc_char_high_stateR[3]=0;
+  sc_lim_low_stateL[0]=0; sc_lim_low_stateL[1]=0; sc_lim_low_stateL[2]=0; sc_lim_low_stateL[3]=0;
+  sc_lim_low_stateR[0]=0; sc_lim_low_stateR[1]=0; sc_lim_low_stateR[2]=0; sc_lim_low_stateR[3]=0;
+  sc_lim_high_stateL[0]=0; sc_lim_high_stateL[1]=0; sc_lim_high_stateL[2]=0; sc_lim_high_stateL[3]=0;
+  sc_lim_high_stateR[0]=0; sc_lim_high_stateR[1]=0; sc_lim_high_stateR[2]=0; sc_lim_high_stateR[3]=0;
+);
+
+reconfigure(os_choice, lookahead_ms);
+last_os_choice = os_choice;
+last_lookahead_ms = lookahead_ms;
+// Character amount is taken directly from the slider (Delta no longer forces 100%).
+effective_character = character;
+dur_thresh_samples = floor((effective_character/100) * CHAR_BUDGET_BASE + 0.5) * factor;
+// Delta Gain settled by ear during testing (Phase 8) -- fixed constant, no longer a
+// live slider.
+DELTA_GAIN_DB = 6.0;
+delta_gain_lin = 10^(DELTA_GAIN_DB/20);
+
+RELEASE_FAST_MIN_MS = 20;  RELEASE_FAST_MAX_MS = 100;
+RELEASE_SLOW_MIN_MS = 300; RELEASE_SLOW_MAX_MS = 1500;
+HISTORY_REFERENCE_DB = -10; // gr_history reaching this (dB, negative) = fully slow release
+release_fast_ms = RELEASE_FAST_MIN_MS + (release_pct/100) * (RELEASE_FAST_MAX_MS - RELEASE_FAST_MIN_MS);
+release_slow_ms = RELEASE_SLOW_MIN_MS + (release_pct/100) * (RELEASE_SLOW_MAX_MS - RELEASE_SLOW_MIN_MS);
+
+// Smoothed-parameter state (Phase 7) -- initialized to each slider's ACTUAL current value
+// (not 0), so there's no smoothing ramp-in when the plugin first loads. threshold_lin,
+// input_gain_lin, output_ceiling_lin, auto_gain_lin, and the sidechain shelf coefficients
+// are no longer set directly here or in @slider -- @sample now recomputes all of them,
+// every sample, from these smoothed values, which is the single source of truth.
+input_gain_smoothed    = input_gain_db;
+threshold_smoothed      = threshold_db;
+ceiling_smoothed        = ceiling_db;
+output_ceiling_smoothed = output_ceiling_db;
+sc_low_shelf_smoothed   = sc_low_shelf_db;
+sc_high_shelf_smoothed  = sc_high_shelf_db;
+
+// Phase 13: mouse-interaction state. -1 = "none active" for drag_ctrl/edit_ctrl/
+// last_click_ctrl (0 is a valid slider-adjacent id, not a safe sentinel here).
+drag_ctrl = -1;
+edit_ctrl = -1;
+last_click_ctrl = -1;
+last_click_time = 0;
+last_mouse_cap = 0;
+edit_x = 0;
+edit_y = 0;
+#edit_str = "";
+
+@slider
+
+(os_choice != last_os_choice) || (lookahead_ms != last_lookahead_ms) ? (
+  reconfigure(os_choice, lookahead_ms);
+  last_os_choice = os_choice;
+  last_lookahead_ms = lookahead_ms;
+);
+
+// effective_character/dur_thresh_samples no longer computed here (Phase 13) -- moved to
+// @sample, which now recomputes it every sample rather than relying on this
+// slider-change callback firing reliably for GUI-driven changes (see @sample for why).
+// delta_gain_lin no longer read from a slider (DELTA_GAIN_DB is fixed, set once in @init).
+release_fast_ms = RELEASE_FAST_MIN_MS + (release_pct/100) * (RELEASE_FAST_MAX_MS - RELEASE_FAST_MIN_MS);
+release_slow_ms = RELEASE_SLOW_MIN_MS + (release_pct/100) * (RELEASE_SLOW_MAX_MS - RELEASE_SLOW_MIN_MS);
+// input_gain_db, threshold_db, ceiling_db, output_ceiling_db, and both sidechain shelf
+// gains are intentionally NOT read here -- @sample's per-sample smoothing is the only
+// path that updates their derived (_lin/_smoothed) values, so a direct set here can't
+// reintroduce the exact one-sample jump this phase exists to remove.
+
+@block
+
+// Character's and Limiter's contributions are both factor-independent base-rate-sample
+// budgets by construction (same pattern as the oversampling filter's DELAY_SAMPLES_BASE),
+// so total latency stays a clean integer regardless of factor or any control setting.
+pdc_delay = DELAY_SAMPLES_BASE + CHAR_BUDGET_BASE + LA_BUDGET_BASE;
+
+@sample
+
+// Character % -> duration threshold (Phase 13 fix): moved here from @slider-only, and
+// now recomputed every sample rather than relying on @slider firing reliably. The bug:
+// Character's clip-duration threshold only updated in @slider, which is REAPER's
+// slider-change-detection callback -- reliable for the native slider UI, but Delta
+// toggled from the custom @gfx UI (via slider_automate()) during active playback wasn't
+// consistently re-triggering it, so dur_thresh_samples stayed frozen at whatever it was
+// the last time @slider genuinely ran (e.g. at transport start) -- matching exactly what
+// was reported: Character only worked correctly when Delta was already on AT transport
+// start, never when toggled on mid-stream. Computing this every sample instead removes
+// the dependency on @slider firing at all, so it can't go stale regardless of the exact
+// mechanism behind that. Still deliberately NOT smoothed -- Character is meant to feel
+// like a mode/character change, not a continuous glide.
+// Character amount is taken directly from the slider (Delta no longer forces 100%).
+effective_character = character;
+dur_thresh_samples = floor((effective_character/100) * CHAR_BUDGET_BASE + 0.5) * factor;
+
+// Click-free parameter smoothing (Phase 7) -- one-pole toward each slider's current
+// value, once per host sample (base rate; this is about avoiding audible steps, not
+// anti-aliasing, so no need to run it at the oversampled rate). Shelf coefficients
+// recompute every sample from the smoothed gain -- cheap here since it's one shared
+// coefficient set per shelf, not per-channel, and avoids the classic click source of
+// slamming a biquad's coefficients against its live (nonzero) state.
+input_gain_smoothed    += (input_gain_db - input_gain_smoothed) * param_smooth_coeff;
+threshold_smoothed      += (threshold_db - threshold_smoothed) * param_smooth_coeff;
+ceiling_smoothed        += (ceiling_db - ceiling_smoothed) * param_smooth_coeff;
+output_ceiling_smoothed += (output_ceiling_db - output_ceiling_smoothed) * param_smooth_coeff;
+sc_low_shelf_smoothed   += (sc_low_shelf_db - sc_low_shelf_smoothed) * param_smooth_coeff;
+sc_high_shelf_smoothed  += (sc_high_shelf_db - sc_high_shelf_smoothed) * param_smooth_coeff;
+
+input_gain_lin = 10^(input_gain_smoothed/20);
+threshold_lin = 10^(threshold_smoothed/20);
+output_ceiling_lin = 10^(output_ceiling_smoothed/20);
+// True-peak safety margin (ISP). 2x/4x oversampled hard-clip + discrete-sample
+// clip cannot fully suppress inter-sample peaks that a higher-OS true-peak meter
+// will still see (downsample FIR ringing / residual ISP). All brick-wall clips
+// therefore run at a slightly lower ceiling; metering, Auto-Gain headroom, and
+// the on-screen Out Ceiling value continue to use the user-set value.
+ISP_MARGIN_DB = 0.5;
+safety_ceiling_lin = 10^((output_ceiling_smoothed - ISP_MARGIN_DB)/20);
+// Limiter Auto Gain is permanently on (Phase 8/10). CORRECTED (Phase 10): the boost
+// itself no longer lives here -- this was a STATIC formula derived purely from Ceiling
+// and Output Ceiling's settings, meaning it applied makeup gain even when the Limiter
+// was doing nothing (GR reading 0.00 dB), which is a real bug: output volume audibly
+// rising as Ceiling was lowered with no reduction happening to justify it. What's
+// computed here now is only the SAFETY CAP -- the maximum boost Auto Gain is ever
+// allowed to apply, same reasoning as before (never restore past Output Ceiling). The
+// actual boost is computed per-tick, inside the oversampled loop, from the REAL
+// final_gr_L/R -- see there for the corrected logic, which mirrors how Character's Auto
+// Makeup Gain already correctly reacts to actual peak-ratio difference rather than a
+// static setting.
+// Cap Auto Gain so it cannot restore past the ISP-margin ceiling either.
+auto_gain_max_boost_db = max(0, (output_ceiling_smoothed - ISP_MARGIN_DB) - ceiling_smoothed);
+
+compute_low_shelf(sc_low_coef, SC_PIVOT_HZ, sc_low_shelf_smoothed, os_rate);
+compute_high_shelf(sc_high_coef, SC_PIVOT_HZ, sc_high_shelf_smoothed, os_rate);
+
+// Input Gain (Drive) is intentionally NOT applied here anymore (Phase 11). It used to
+// run before Character, which meant turning up Drive pushed MORE material over
+// Character's Threshold as a side effect of just wanting to hit the Limiter harder --
+// conflating two independent decisions. Gain now applies AFTER Character (see inside the
+// oversampled loop below), so Character's own behavior is entirely Gain-independent, and
+// Drive purely controls how hard the Character-processed signal hits the Limiter.
+raw_histL[hist_wpos] = spl0 * factor;
+raw_histL[hist_wpos + RAW_HIST_LEN] = spl0 * factor;
+raw_histR[hist_wpos] = spl1 * factor;
+raw_histR[hist_wpos + RAW_HIST_LEN] = spl1 * factor;
+hist_base = hist_wpos + RAW_HIST_LEN;
+
+// Hoisted: constant across the oversampled ticks of this host sample.
+link_frac = link_pct / 100;
+
+j = 0;
+while (j < factor) (
+  up_L = poly_up(raw_histL, coeffs, hist_base, j, factor, ntaps);
+  up_R = poly_up(raw_histR, coeffs, hist_base, j, factor, ntaps);
+
+  // Full wet path always runs (Character, Limiter, Auto Gain) so Auto Gain state
+  // stays live and level-matched A/B remains valid when Bypass is toggled.
+  // CPU savings on Bypass come only from skipping unused FIR down-convolves:
+  //   Bypass on  → raw-dry convolves only (2 FIRs)
+  //   Normal     → main convolves only (2 FIRs)
+  //   Delta      → main + gained-dry convolves (4 FIRs)
+  sc_char_L = sc_filter(sc_char_low_stateL, sc_char_high_stateL, sc_low_coef, sc_high_coef, up_L);
+  sc_char_R = sc_filter(sc_char_low_stateR, sc_char_high_stateR, sc_low_coef, sc_high_coef, up_R);
+
+  char_L = char_process(char_audioL, char_flagL, char_stateL, wpos_char, char_buf_size, threshold_lin, dur_thresh_samples, up_L, sc_char_L);
+  char_R = char_process(char_audioR, char_flagR, char_stateR, wpos_char, char_buf_size, threshold_lin, dur_thresh_samples, up_R, sc_char_R);
+  dry_L = bare_delay(char_dry_bufL, wpos_char, up_L);
+  dry_R = bare_delay(char_dry_bufR, wpos_char, up_R);
+  wpos_char = (wpos_char + 1) % char_buf_size;
+
+  makeup_L = apply_makeup(makeup_stateL, dry_L, char_L, makeup_attack_coeff, makeup_release_coeff, 0, 12);
+  makeup_R = apply_makeup(makeup_stateR, dry_R, char_R, makeup_attack_coeff, makeup_release_coeff, 0, 12);
+
+  makeup_L *= input_gain_lin;
+  makeup_R *= input_gain_lin;
+  gdry_L = dry_L * input_gain_lin;
+  gdry_R = dry_R * input_gain_lin;
+
+  lim_sig_L = sc_filter(sc_lim_low_stateL, sc_lim_high_stateL, sc_low_coef, sc_high_coef, makeup_L);
+  lim_sig_R = sc_filter(sc_lim_low_stateR, sc_lim_high_stateR, sc_low_coef, sc_high_coef, makeup_R);
+  gr_L = limiter_compute_gr(la_stateL, lim_sig_L, ceiling_smoothed, attack_coeff, history_attack_coeff, history_decay_coeff, release_fast_ms, release_slow_ms, HISTORY_REFERENCE_DB, os_rate);
+  gr_R = limiter_compute_gr(la_stateR, lim_sig_R, ceiling_smoothed, attack_coeff, history_attack_coeff, history_decay_coeff, release_fast_ms, release_slow_ms, HISTORY_REFERENCE_DB, os_rate);
+
+  shared_gr_db = min(gr_L, gr_R);
+  final_gr_L = gr_L * (1 - link_frac) + shared_gr_db * link_frac;
+  final_gr_R = gr_R * (1 - link_frac) + shared_gr_db * link_frac;
+
+  lim_L = limiter_apply(la_bufL, wpos_la, lim_sig_L, final_gr_L);
+  lim_R = limiter_apply(la_bufR, wpos_la, lim_sig_R, final_gr_R);
+  dry_la_L = bare_delay(la_dry_bufL, wpos_la, gdry_L);
+  dry_la_R = bare_delay(la_dry_bufR, wpos_la, gdry_R);
+  dry_raw_la_L = bare_delay(la_dry_raw_bufL, wpos_la, dry_L);
+  dry_raw_la_R = bare_delay(la_dry_raw_bufR, wpos_la, dry_R);
+  charonly_la_L = bare_delay(charonly_la_bufL, wpos_la, makeup_L);
+  charonly_la_R = bare_delay(charonly_la_bufR, wpos_la, makeup_R);
+  wpos_la = (wpos_la + 1) % la_buf_size;
+
+  limiter_auto_gain > 0.5 ? (
+    stage_L = apply_makeup(full_gain_stateL, dry_L, lim_L, makeup_attack_coeff, makeup_release_coeff, -60, auto_gain_max_boost_db);
+    stage_R = apply_makeup(full_gain_stateR, dry_R, lim_R, makeup_attack_coeff, makeup_release_coeff, -60, auto_gain_max_boost_db);
+  ) : (
+    stage_L = lim_L;
+    stage_R = lim_R;
+  );
+  listen_mode > 0.5 ? (
+    stage_L = charonly_la_L;
+    stage_R = charonly_la_R;
+  );
+
+  tp_level_L_db = 20 * log(max(abs(stage_L), 0.0000000001)) / LN10;
+  tp_level_R_db = 20 * log(max(abs(stage_R), 0.0000000001)) / LN10;
+
+  tp_level_L_db > tp_disp_L ? tp_disp_L += (tp_level_L_db - tp_disp_L) * tp_attack_coeff : tp_disp_L += (tp_level_L_db - tp_disp_L) * tp_release_coeff;
+  tp_level_R_db > tp_disp_R ? tp_disp_R += (tp_level_R_db - tp_disp_R) * tp_attack_coeff : tp_disp_R += (tp_level_R_db - tp_disp_R) * tp_release_coeff;
+
+  stage_L > safety_ceiling_lin ? stage_L = safety_ceiling_lin;
+  stage_L < -safety_ceiling_lin ? stage_L = -safety_ceiling_lin;
+  stage_R > safety_ceiling_lin ? stage_R = safety_ceiling_lin;
+  stage_R < -safety_ceiling_lin ? stage_R = -safety_ceiling_lin;
+
+  // Always keep all downsample buffers filled so mode switches stay seamless.
+  down_push(down_bufL, wpos_down, stage_L, ntaps);
+  down_push(down_bufR, wpos_down, stage_R, ntaps);
+  down_push(down_dry_bufL, wpos_down, dry_la_L, ntaps);
+  down_push(down_dry_bufR, wpos_down, dry_la_R, ntaps);
+  down_push(down_dry_raw_bufL, wpos_down, dry_raw_la_L, ntaps);
+  down_push(down_dry_raw_bufR, wpos_down, dry_raw_la_R, ntaps);
+
+  // Expensive FIR only for the path that is actually heard this sample.
+  j == 0 ? (
+    bypass > 0.5 ? (
+      out_dry_raw_L = down_convolve(down_dry_raw_bufL, coeffs, wpos_down, ntaps);
+      out_dry_raw_R = down_convolve(down_dry_raw_bufR, coeffs, wpos_down, ntaps);
+    ) : (
+      out_L = down_convolve(down_bufL, coeffs, wpos_down, ntaps);
+      out_R = down_convolve(down_bufR, coeffs, wpos_down, ntaps);
+      listen_mode > 0.5 ? (
+        out_dry_L = down_convolve(down_dry_bufL, coeffs, wpos_down, ntaps);
+        out_dry_R = down_convolve(down_dry_bufR, coeffs, wpos_down, ntaps);
+      );
+    );
+  );
+
+  wpos_down = (wpos_down + 1) % ntaps;
+  j += 1;
+);
+
+hist_wpos = (hist_wpos + 1) % RAW_HIST_LEN;
+
+// GR meter display: fast catch (jump immediately to a deeper reduction), slow decay back
+// toward 0 otherwise -- standard GR meter ballistics. Uses the actual post-Link
+// final_gr_L/R from the last oversampled tick this block, the same values applied to
+// the audio -- this is a direct readout, not a separate estimate.
+final_gr_L < disp_gr_L ? disp_gr_L = final_gr_L : (disp_gr_L += (0 - disp_gr_L) * meter_decay_coeff; disp_gr_L = dn(disp_gr_L));
+final_gr_R < disp_gr_R ? disp_gr_R = final_gr_R : (disp_gr_R += (0 - disp_gr_R) * meter_decay_coeff; disp_gr_R = dn(disp_gr_R));
+
+// Character Activity meter display (Phase 8) -- the "spike energy removed" indicator
+// flagged as a gap all the way back in the original design conversation. dry_L/char_L
+// are the LAST oversampled tick's time-aligned dry/processed pair (same one Auto Makeup
+// Gain and Delta mode already use) -- when Character clipped, char_L's magnitude is
+// smaller than dry_L's; when it didn't, they're equal and the dB difference is ~0. No
+// separate flag needed, the level difference IS the activity. Same fast-catch/slow-decay
+// ballistics as the GR meter, for a consistent visual language once skinned.
+char_act_L_db = max(0, 20*log(max(abs(dry_L), 0.0000000001))/LN10 - 20*log(max(abs(char_L), 0.0000000001))/LN10);
+char_act_R_db = max(0, 20*log(max(abs(dry_R), 0.0000000001))/LN10 - 20*log(max(abs(char_R), 0.0000000001))/LN10);
+char_act_L_db > char_disp_L ? char_disp_L = char_act_L_db : (char_disp_L += (0 - char_disp_L) * meter_decay_coeff; char_disp_L = dn(char_disp_L));
+char_act_R_db > char_disp_R ? char_disp_R = char_act_R_db : (char_disp_R += (0 - char_disp_R) * meter_decay_coeff; char_disp_R = dn(char_disp_R));
+
+// Peak-hold markers (Phase 8b) -- one call per meter per channel, using the same
+// just-updated display values above. GR uses the "lower is more extreme" variant (deeper
+// reduction = more negative); True Peak and Character Activity use "higher is more
+// extreme" (louder / more removed).
+gr_hold_L = peak_hold_low(gr_hold_stateL, disp_gr_L, PEAK_HOLD_TIME_SAMPLES, PEAK_HOLD_FALL_PER_SAMPLE_DB);
+gr_hold_R = peak_hold_low(gr_hold_stateR, disp_gr_R, PEAK_HOLD_TIME_SAMPLES, PEAK_HOLD_FALL_PER_SAMPLE_DB);
+tp_hold_L = peak_hold_high(tp_hold_stateL, tp_disp_L, PEAK_HOLD_TIME_SAMPLES, PEAK_HOLD_FALL_PER_SAMPLE_DB);
+tp_hold_R = peak_hold_high(tp_hold_stateR, tp_disp_R, PEAK_HOLD_TIME_SAMPLES, PEAK_HOLD_FALL_PER_SAMPLE_DB);
+char_hold_L = peak_hold_high(char_hold_stateL, char_disp_L, PEAK_HOLD_TIME_SAMPLES, PEAK_HOLD_FALL_PER_SAMPLE_DB);
+char_hold_R = peak_hold_high(char_hold_stateR, char_disp_R, PEAK_HOLD_TIME_SAMPLES, PEAK_HOLD_FALL_PER_SAMPLE_DB);
+
+// Dynamic Range tracker (Phase 12, corrected in 12d) -- LRA_MAX/LRA_MIN via proper
+// envelope-follower ballistics (lra_track_high/low), not peak-hold -- see those
+// functions' own comments for why. This is NOT true EBU R128 LRA (no K-weighting, no
+// gating, no percentile statistics over the whole file) -- it's a lightweight, real-time
+// approximation using machinery already in the file, giving a genuine "how much has
+// loudness actually swung over the last while" reading.
+//
+// Both trackers start pinned at 0dB (see reconfigure()'s clear block) -- range begins at
+// exactly 0 and EXPANDS outward as real playback reveals the material's actual dynamics,
+// rather than snapping to (or easing toward) some arbitrary first-reading value. Gated
+// behind LRA_GATE_DB so pure silence never gets treated as a legitimate reading at all.
+LRA_GATE_DB = -40;
+tp_disp_L > LRA_GATE_DB ? (
+  tp_lra_max_L = lra_track_high(tp_lra_max_stateL, tp_disp_L, lra_max_attack_coeff, lra_max_release_coeff);
+  tp_lra_min_L = lra_track_low(tp_lra_min_stateL, tp_disp_L, lra_min_attack_coeff, lra_min_release_coeff);
+) : (
+  tp_lra_max_L = tp_lra_max_stateL[0];
+  tp_lra_min_L = tp_lra_min_stateL[0];
+);
+tp_disp_R > LRA_GATE_DB ? (
+  tp_lra_max_R = lra_track_high(tp_lra_max_stateR, tp_disp_R, lra_max_attack_coeff, lra_max_release_coeff);
+  tp_lra_min_R = lra_track_low(tp_lra_min_stateR, tp_disp_R, lra_min_attack_coeff, lra_min_release_coeff);
+) : (
+  tp_lra_max_R = tp_lra_max_stateR[0];
+  tp_lra_min_R = tp_lra_min_stateR[0];
+);
+
+// Over indicator (two-tier) tracks the PEAK-HOLD value (tp_hold), same reasoning as
+// before -- deliberately more tolerant than reacting to every momentary excursion, since
+// that's not how mastering-level limiting decisions actually get made. Split into two
+// severities: YELLOW fires whenever the safety clip is doing real work (held peak past
+// Output Ceiling) -- expected and often accepted by ear, to a degree, for hotter genres.
+// RED fires only past true 0 dBTP -- genuine hard digital clipping, the thing you
+// actually want a harder warning about regardless of genre or intent. Both read tp_hold,
+// which is measured pre-safety-clip, so a peak that would have gone properly over 0 dBTP
+// still triggers red even though the final output never actually reaches it -- that's
+// the point, it tells you how hard the safety net had to work, not just that it worked.
+tp_over_yellow_L = ((tp_hold_L > output_ceiling_smoothed) && (tp_hold_L <= 0)) ? 1 : 0;
+tp_over_yellow_R = ((tp_hold_R > output_ceiling_smoothed) && (tp_hold_R <= 0)) ? 1 : 0;
+tp_over_red_L = (tp_hold_L > 0) ? 1 : 0;
+tp_over_red_R = (tp_hold_R > 0) ? 1 : 0;
+
+// gmem export (Phase 8/8b) -- named pool so the upcoming CS skin can probe these
+// directly. The options:gmem= name near the top of the file is a PLACEHOLDER; swap for
+// your actual CS naming convention before skinning.
+gmem[0] = disp_gr_L;         gmem[1] = disp_gr_R;
+gmem[2] = tp_disp_L;         gmem[3] = tp_disp_R;
+gmem[4] = tp_over_yellow_L;  gmem[5] = tp_over_yellow_R;
+gmem[6] = char_disp_L;       gmem[7] = char_disp_R;
+gmem[8] = gr_hold_L;         gmem[9] = gr_hold_R;
+gmem[10] = tp_hold_L;        gmem[11] = tp_hold_R;
+gmem[12] = char_hold_L;      gmem[13] = char_hold_R;
+gmem[14] = tp_over_red_L;    gmem[15] = tp_over_red_R;
+
+// Second safety clip, AFTER downsampling. Uses the same ISP-margin ceiling so discrete
+// samples and residual ringing stay under the user-facing Out Ceiling.
+out_L > safety_ceiling_lin ? out_L = safety_ceiling_lin;
+out_L < -safety_ceiling_lin ? out_L = -safety_ceiling_lin;
+out_R > safety_ceiling_lin ? out_R = safety_ceiling_lin;
+out_R < -safety_ceiling_lin ? out_R = -safety_ceiling_lin;
+
+// Bypass (Phase 7, reference fixed in 11b) takes priority over Listen Mode entirely --
+// there's nothing meaningful to Delta against when the point is to hear the untouched
+// signal. Uses out_dry_raw_L/R -- the TRUE raw input (before Character, Gain, and SC
+// EQ), not out_dry_L/R (which is Delta's GAINED reference, matching what Character
+// removed at the level Drive is pushing, not a true passthrough). Clipped against the
+// SAME safety ceiling as the processed output, but into separate bypass_out_L/R
+// variables -- clipping out_dry_raw_L/R in place would corrupt anything else that reads
+// it later in the block.
+bypass > 0.5 ? (
+  bypass_out_L = out_dry_raw_L;
+  bypass_out_R = out_dry_raw_R;
+  bypass_out_L > safety_ceiling_lin ? bypass_out_L = safety_ceiling_lin;
+  bypass_out_L < -safety_ceiling_lin ? bypass_out_L = -safety_ceiling_lin;
+  bypass_out_R > safety_ceiling_lin ? bypass_out_R = safety_ceiling_lin;
+  bypass_out_R < -safety_ceiling_lin ? bypass_out_R = -safety_ceiling_lin;
+  spl0 = bypass_out_L;
+  spl1 = bypass_out_R;
+) : listen_mode < 0.5 ? (
+  spl0 = out_L;
+  spl1 = out_R;
+) : (
+  // What was removed: dry (true unprocessed input, delay-matched through the same
+  // Character+Limiter chain length) minus the fully processed output (gain and safety
+  // clip already applied upstream, in the oversampled domain). Positive when any stage
+  // pulled a peak down net of any compensation. Gain-boosted since this is typically
+  // very quiet -- meant for dialing in by ear.
+  spl0 = (out_dry_L - out_L) * delta_gain_lin;
+  spl1 = (out_dry_R - out_R) * delta_gain_lin;
+  // Safety clip on the boosted delta itself (ISP-margin ceiling).
+  spl0 > safety_ceiling_lin ? spl0 = safety_ceiling_lin;
+  spl0 < -safety_ceiling_lin ? spl0 = -safety_ceiling_lin;
+  spl1 > safety_ceiling_lin ? spl1 = safety_ceiling_lin;
+  spl1 < -safety_ceiling_lin ? spl1 = -safety_ceiling_lin;
+);
+
+// Short-term LUFS guidance meter (~3 s). Measures the audible output (spl0/spl1)
+// so Bypass/Delta reflect what you hear. Not a certified integrated meter.
+lufs_z_L = lufs_kweight(lufs_kw1_L, lufs_kw2_L, spl0);
+lufs_z_R = lufs_kweight(lufs_kw1_R, lufs_kw2_R, spl1);
+// BS.1770 stereo: sum of channel powers (G_L = G_R = 1), not the average.
+// Using 0.5* made the meter ~3 dB too low vs reference LUFS-S.
+lufs_ms = lufs_z_L*lufs_z_L + lufs_z_R*lufs_z_R;
+lufs_ms_env[0] += (lufs_ms - lufs_ms_env[0]) * lufs_ms_coeff;
+lufs_ms_env[0] = dn(lufs_ms_env[0]);
+// BS.1770 absolute gated loudness offset for stereo mean-square of K-weighted signals.
+lufs_st_db = -0.691 + 10 * log(max(lufs_ms_env[0], 0.00000000000000000001)) / LN10;
+gmem[16] = lufs_st_db;
+
+@gfx 1000 600
+
+// ---- Phase 9 STATIC LAYOUT PREVIEW, rev 5 ---------------------------------------------
+// Three fixes from the last round: (1) column gaps were genuinely inconsistent (20px
+// between Col1/Col2, 30px into the meters, 15px between meter columns) -- all now a
+// single GAP=20 used everywhere, horizontal and vertical alike, with DESIGN_W recomputed
+// so the left/right margins come out equal too. (2) Character meter column header was
+// "CHARACTER -- FIRST" -- simplified to just "CHARACTER" per feedback. (3) Font sizes
+// were scattered across 9-12px despite rev 4 claiming to match your Wishcraft Calm
+// reference -- that reference actually uses ONE consistent body size (13px, via
+// font_px) for labels AND values alike, not a smaller size for values. Standardized on
+// BODY_FONT/GROUP_FONT/SMALL_FONT below instead of ad-hoc per-call sizes, and raised the
+// hard floor in set_font() from 8 to 10 so nothing can shrink past that regardless of
+// window size.
+
+DESIGN_W = 975;
+DESIGN_H = 600;
+MIN_SCALE = 0.5;
+MAX_SCALE = 3;
+BODY_FONT = 13;
+GROUP_FONT = 14;
+SMALL_FONT = 12;
+
+SCALE = min(gfx_w / DESIGN_W, gfx_h / DESIGN_H);
+SCALE = max(MIN_SCALE, min(SCALE, MAX_SCALE));
+OFF_X = (gfx_w - DESIGN_W * SCALE) / 2;
+OFF_Y = (gfx_h - DESIGN_H * SCALE) / 2;
+
+handle_text_edit();
+
+gfx_set(0, 0, 0, 1);
+gfx_rect(0, 0, gfx_w, gfx_h);
+
+gfx_set(1, 1, 1, 1);
+set_font(17);
+gfx_x = SX(DESIGN_W/2) - SZ(150); gfx_y = SY(8);
+gfx_drawstr("WISHCRAFT MASTERING LIMITER");
+
+// ---- Shared vertical rhythm: every macro-column starts here and ends at the same y ----
+COL_TOP = 44;
+COL_H = 480;
+GAP = 20; // single gap value, used for every horizontal AND vertical spacing below
+
+// =========================================================================================
+// COLUMN 1 (x 10-230): Input / Character / Sidechain EQ, stacked, heights sum to COL_H
+// =========================================================================================
+C1_X = 10;
+C1_W = 220;
+C1_CX = C1_X + C1_W/2;
+
+// GAIN is shorter now (no redundant "Drive" label above the single knob).
+// The reclaimed height is given to CHARACTER so Delta sits cleanly below the % value.
+IN_H  = 90;
+CH_H  = 190;
+SC_H  = COL_H - IN_H - CH_H - GAP*2; // still sums to COL_H exactly
+
+IN_Y = COL_TOP;
+CH_Y = IN_Y + IN_H + GAP;
+SC_Y = CH_Y + CH_H + GAP;
+
+draw_group(C1_X, IN_Y, C1_W, IN_H, "GAIN");
+// Empty label string removes the redundant "Drive" text (group title already says GAIN).
+input_gain_db = knob_interact(8, C1_CX, IN_Y + 48, 24, input_gain_db, 0, 24, 0);
+interact_changed ? slider_automate(slider8);
+draw_knob(C1_CX, IN_Y + 48, 24, input_gain_db / 24, "", input_gain_db, "%.1f dB");
+
+draw_group(C1_X, CH_Y, C1_W, CH_H, "SELECTIVE CLIPPER");
+// Horizontal sliders (same style as Sidechain EQ). Extra group height gives the
+// Selectivity value (%) clear space above the Delta button.
+threshold_db = hslider_interact(2, C1_CX, CH_Y + 42, 150, threshold_db, -24, 0, -3);
+interact_changed ? slider_automate(slider2);
+draw_hslider(C1_CX, CH_Y + 42, 150, (threshold_db + 24) / 24, "Threshold", threshold_db, "%.1f dB", "-24", "0");
+character = hslider_interact(3, C1_CX, CH_Y + 108, 150, character, 0, 100, 50);
+interact_changed ? slider_automate(slider3);
+draw_hslider(C1_CX, CH_Y + 108, 150, character / 100, "Selectivity", character, "%.0f%%", "Transparent", "Aggressive");
+listen_mode = button_interact(4, C1_CX, CH_Y + 168, 70, 22, listen_mode);
+interact_changed ? slider_automate(slider4);
+draw_button(C1_CX, CH_Y + 168, 70, 22, listen_mode, "Delta", 1, 0.82, 0.15);
+
+draw_group(C1_X, SC_Y, C1_W, SC_H, "SIDECHAIN EQ");
+sc_low_shelf_db = hslider_interact(11, C1_CX, SC_Y + 48, 150, sc_low_shelf_db, -6, 6, 0);
+interact_changed ? slider_automate(slider11);
+draw_hslider(C1_CX, SC_Y + 48, 150, (sc_low_shelf_db + 6) / 12, "Low", sc_low_shelf_db, "%.1f dB", "-6", "+6");
+sc_high_shelf_db = hslider_interact(12, C1_CX, SC_Y + 114, 150, sc_high_shelf_db, -6, 6, 0);
+interact_changed ? slider_automate(slider12);
+draw_hslider(C1_CX, SC_Y + 114, 150, (sc_high_shelf_db + 6) / 12, "High", sc_high_shelf_db, "%.1f dB", "-6", "+6");
+
+// =========================================================================================
+// COLUMN 2 (x 250-470): Limiter / Utility, stacked, heights sum to COL_H
+// =========================================================================================
+C2_X = C1_X + C1_W + GAP;
+C2_W = 220;
+C2_CX = C2_X + C2_W/2;
+
+LIM_H = 345;
+UTL_H = COL_H - LIM_H - GAP; // 120
+
+LIM_Y = COL_TOP;
+UTL_Y = LIM_Y + LIM_H + GAP;
+
+draw_group(C2_X, LIM_Y, C2_W, LIM_H, "LIMITER");
+ceiling_db = knob_interact(5, C2_X + 55, LIM_Y + 68, 22, ceiling_db, -18, 0, -1);
+interact_changed ? slider_automate(slider5);
+draw_knob(C2_X + 55, LIM_Y + 68, 22, (ceiling_db + 18) / 18, "Ceiling", ceiling_db, "%.1f dB");
+lookahead_ms = knob_interact(6, C2_X + 165, LIM_Y + 68, 22, lookahead_ms, 0.5, 20, 3);
+interact_changed ? slider_automate(slider6);
+draw_knob(C2_X + 165, LIM_Y + 68, 22, (lookahead_ms - 0.5) / 19.5, "Lookahead", lookahead_ms, "%.1f ms");
+release_pct = knob_interact(7, C2_X + 55, LIM_Y + 153, 22, release_pct, 0, 100, 30);
+interact_changed ? slider_automate(slider7);
+draw_knob(C2_X + 55, LIM_Y + 153, 22, release_pct / 100, "Release", release_pct, "%.0f%%");
+link_pct = knob_interact(10, C2_X + 165, LIM_Y + 153, 22, link_pct, 0, 100, 75);
+interact_changed ? slider_automate(slider10);
+draw_knob(C2_X + 165, LIM_Y + 153, 22, link_pct / 100, "Link", link_pct, "%.0f%%");
+output_ceiling_db = knob_interact(9, C2_CX, LIM_Y + 238, 22, output_ceiling_db, -3, 0, -1);
+interact_changed ? slider_automate(slider9);
+draw_knob(C2_CX, LIM_Y + 238, 22, (output_ceiling_db + 3) / 3, "Out Ceiling", output_ceiling_db, "%.2f dB");
+limiter_auto_gain = button_interact(14, C2_CX, LIM_Y + 300, 90, 22, limiter_auto_gain);
+interact_changed ? slider_automate(slider14);
+draw_button(C2_CX, LIM_Y + 300, 90, 22, limiter_auto_gain, "Auto Gain", 1, 0.82, 0.15);
+
+draw_group(C2_X, UTL_Y, C2_W, UTL_H, "UTILITY");
+os_choice = radio_button_interact(1, C2_CX - 42, UTL_Y + 35, 70, 22, 0, os_choice);
+interact_changed ? slider_automate(slider1);
+os_choice = radio_button_interact(1, C2_CX + 42, UTL_Y + 35, 70, 22, 1, os_choice);
+interact_changed ? slider_automate(slider1);
+draw_button(C2_CX - 42, UTL_Y + 35, 70, 22, os_choice < 0.5, "2x", 0.2, 0.6, 1);
+draw_button(C2_CX + 42, UTL_Y + 35, 70, 22, os_choice > 0.5, "4x", 0.2, 0.6, 1);
+bypass = button_interact(13, C2_CX, UTL_Y + 75, 90, 22, bypass);
+interact_changed ? slider_automate(slider13);
+draw_button(C2_CX, UTL_Y + 75, 90, 22, bypass, "Bypass", 1, 0.82, 0.15);
+
+// =========================================================================================
+// COLUMNS 3-5 (x 490-965): Character / GR / True Peak meters, all COL_H tall
+// =========================================================================================
+MCOL_W = 145;
+MCOL1_X = C2_X + C2_W + GAP;
+MCOL2_X = MCOL1_X + MCOL_W + GAP;
+MCOL3_X = MCOL2_X + MCOL_W + GAP;
+
+MBAR_TOP = COL_TOP + 96;
+MBAR_H = COL_H - 96 - 40; // 344 -- leaves room for header/readouts above, end-label below
+MDOT_R = 6;
+
+// -- Character Activity -- FIRST, dial this in before anything else -- 0dB at top
+// (neutral/no clipping reference), hangs down as more gets removed.
+draw_group(MCOL1_X, COL_TOP, MCOL_W, COL_H, "SELECTIVE CLIP");
+draw_text(MCOL1_X + 8, COL_TOP + 26, BODY_FONT, 0.44, 0.66, 0.81, "L "); gfx_drawnumber(char_hold_L, 2); gfx_drawstr(" dB");
+draw_text(MCOL1_X + 8, COL_TOP + 46, BODY_FONT, 0.44, 0.66, 0.81, "R "); gfx_drawnumber(char_hold_R, 2); gfx_drawstr(" dB");
+draw_text(MCOL1_X + 8, COL_TOP + 70, SMALL_FONT, 0.6, 0.6, 0.6, "0dB");
+
+CHAR_BAR_MAX_DB = 12;
+char_L_frac = min(max(char_disp_L / CHAR_BAR_MAX_DB, 0), 1);
+char_R_frac = min(max(char_disp_R / CHAR_BAR_MAX_DB, 0), 1);
+char_hold_L_frac = min(max(char_hold_L / CHAR_BAR_MAX_DB, 0), 1);
+char_hold_R_frac = min(max(char_hold_R / CHAR_BAR_MAX_DB, 0), 1);
+
+draw_vmeter(MCOL1_X + MCOL_W/2 - 26, MBAR_TOP, 44, MBAR_H, char_L_frac, char_hold_L_frac, 0.7, 0.3, 0.9, 1);
+draw_vmeter(MCOL1_X + MCOL_W/2 + 26, MBAR_TOP, 44, MBAR_H, char_R_frac, char_hold_R_frac, 0.9, 0.6, 0.2, 1);
+draw_text(MCOL1_X + 8, MBAR_TOP + MBAR_H + 8, SMALL_FONT, 0.6, 0.6, 0.6, "-12dB");
+
+// -- GR -- SECOND, inverted fill (grows with MORE reduction) -- 0dB at top (no
+// reduction), hangs down as the Limiter works harder.
+draw_group(MCOL2_X, COL_TOP, MCOL_W, COL_H, "GAIN REDUCTION");
+draw_text(MCOL2_X + 8, COL_TOP + 26, BODY_FONT, 0.44, 0.66, 0.81, "L "); gfx_drawnumber(gr_hold_L, 2); gfx_drawstr(" dB");
+draw_text(MCOL2_X + 8, COL_TOP + 46, BODY_FONT, 0.44, 0.66, 0.81, "R "); gfx_drawnumber(gr_hold_R, 2); gfx_drawstr(" dB");
+draw_text(MCOL2_X + 8, COL_TOP + 70, SMALL_FONT, 0.6, 0.6, 0.6, "0dB");
+
+BAR_MAX_DB = 24;
+gr_L_frac = min(max(-disp_gr_L / BAR_MAX_DB, 0), 1);
+gr_R_frac = min(max(-disp_gr_R / BAR_MAX_DB, 0), 1);
+gr_hold_L_frac = min(max(-gr_hold_L / BAR_MAX_DB, 0), 1);
+gr_hold_R_frac = min(max(-gr_hold_R / BAR_MAX_DB, 0), 1);
+
+draw_vmeter(MCOL2_X + MCOL_W/2 - 26, MBAR_TOP, 44, MBAR_H, gr_L_frac, gr_hold_L_frac, 0.2, 0.6, 1, 1);
+draw_vmeter(MCOL2_X + MCOL_W/2 + 26, MBAR_TOP, 44, MBAR_H, gr_R_frac, gr_hold_R_frac, 1, 0.45, 0.2, 1);
+draw_text(MCOL2_X + 8, MBAR_TOP + MBAR_H + 8, SMALL_FONT, 0.6, 0.6, 0.6, "-24dB");
+
+// -- True Peak -- THIRD, output safety checked last. Direct fill (grows with LOUDER),
+// bottom-up (invert=0) -- unlike GR/Character, True Peak's "0" end IS the extreme/loud
+// end, not a neutral reference, so it stays anchored at the top with the fill building
+// UP toward it, same as before. Over dots sit beside the L/R readout lines -- same
+// vertical rhythm as the other two meter columns, so all three bars start at exactly the
+// same y. Each readout's color is now set explicitly by draw_text itself, so the dot's
+// color logic in between no longer leaks into the R row or the range label below it --
+// that was the actual color bug.
+draw_group(MCOL3_X, COL_TOP, MCOL_W, COL_H, "OUTPUT");
+draw_text(MCOL3_X + 8, COL_TOP + 26, BODY_FONT, 0.44, 0.66, 0.81, "L "); gfx_drawnumber(tp_hold_L, 2); gfx_drawstr(" dBTP");
+tp_over_red_L > 0.5 ? gfx_set(1, 0.2, 0.2, 1) : tp_over_yellow_L > 0.5 ? gfx_set(1, 0.8, 0.1, 1) : gfx_set(0.3, 0.3, 0.3, 1);
+gfx_circle(SX(MCOL3_X + MCOL_W - 14), SY(COL_TOP + 30), SZ(MDOT_R), 1, 1);
+
+draw_text(MCOL3_X + 8, COL_TOP + 46, BODY_FONT, 0.44, 0.66, 0.81, "R "); gfx_drawnumber(tp_hold_R, 2); gfx_drawstr(" dBTP");
+tp_over_red_R > 0.5 ? gfx_set(1, 0.2, 0.2, 1) : tp_over_yellow_R > 0.5 ? gfx_set(1, 0.8, 0.1, 1) : gfx_set(0.3, 0.3, 0.3, 1);
+gfx_circle(SX(MCOL3_X + MCOL_W - 14), SY(COL_TOP + 50), SZ(MDOT_R), 1, 1);
+
+// Dynamic Range readout (Phase 12b -- replaces the "0dBTP" axis label, which was
+// redundant with the bar's own visible scale anyway). L&R combined into one shared
+// figure: widest extent across both channels' LRA_MAX/LRA_MIN trackers.
+tp_lra_combined_max = max(tp_lra_max_L, tp_lra_max_R);
+tp_lra_combined_min = min(tp_lra_min_L, tp_lra_min_R);
+tp_lra_range_db = max(0, tp_lra_combined_max - tp_lra_combined_min);
+// Dyn Range (left) and short-term LUFS (below) — separate rows so they never overlap.
+draw_text(MCOL3_X + 8, COL_TOP + 68, SMALL_FONT, 0.3, 0.9, 0.4, "Dyn ");
+gfx_drawnumber(tp_lra_range_db, 1); gfx_drawstr(" dB");
+sprintf(#lufs_str, "ST %.1f LUFS", lufs_st_db);
+draw_text(MCOL3_X + 8, COL_TOP + 84, SMALL_FONT, 0.9, 0.75, 0.2, #lufs_str);
+
+TP_BAR_RANGE_DB = 18;
+tp_L_frac = min(max((tp_disp_L + TP_BAR_RANGE_DB) / TP_BAR_RANGE_DB, 0), 1);
+tp_R_frac = min(max((tp_disp_R + TP_BAR_RANGE_DB) / TP_BAR_RANGE_DB, 0), 1);
+tp_hold_L_frac = min(max((tp_hold_L + TP_BAR_RANGE_DB) / TP_BAR_RANGE_DB, 0), 1);
+tp_hold_R_frac = min(max((tp_hold_R + TP_BAR_RANGE_DB) / TP_BAR_RANGE_DB, 0), 1);
+
+draw_vmeter(MCOL3_X + MCOL_W/2 - 26, MBAR_TOP, 44, MBAR_H, tp_L_frac, tp_hold_L_frac, 0.2, 0.8, 0.4, 0);
+draw_vmeter(MCOL3_X + MCOL_W/2 + 26, MBAR_TOP, 44, MBAR_H, tp_R_frac, tp_hold_R_frac, 0.2, 0.8, 0.4, 0);
+
+// Standalone Dynamic Range bar (Phase 12b) -- single narrow indicator, L&R combined,
+// sitting in the margin to the left of the left Output bar. Same combined min/max
+// computed above for the numeric readout, normalized the same way as the main bars.
+tp_lra_combined_max_frac = min(max((tp_lra_combined_max + TP_BAR_RANGE_DB) / TP_BAR_RANGE_DB, 0), 1);
+tp_lra_combined_min_frac = min(max((tp_lra_combined_min + TP_BAR_RANGE_DB) / TP_BAR_RANGE_DB, 0), 1);
+draw_range_bar(MCOL3_X + 12, MBAR_TOP, 8, MBAR_H, tp_lra_combined_min_frac, tp_lra_combined_max_frac, 0.3, 0.9, 0.4);
+
+draw_text(MCOL3_X + 8, MBAR_TOP + MBAR_H + 8, SMALL_FONT, 0.6, 0.6, 0.6, "-18dBTP");
+
+// Text-entry box drawn LAST so it renders on top of every control, and last_mouse_cap
+// updated LAST so every interact_/handle_ call above it this frame correctly saw the
+// PREVIOUS frame's state for edge detection (new-press vs. held).
+draw_edit_box();
+last_mouse_cap = mouse_cap;
