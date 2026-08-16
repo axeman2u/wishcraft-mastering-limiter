@@ -1,0 +1,139 @@
+#pragma once
+
+#include <cmath>
+#include <vector>
+
+// Ports the JSFX's oversampling engine (@init's DELAY_SAMPLES_BASE / MAX_FACTOR /
+// MAX_NTAPS / RAW_HIST_LEN block, plus compute_coeffs / poly_up / down_push /
+// down_convolve) as closely to the original structure as possible, so the two stay
+// null-testable against each other. One instance handles one audio channel; the
+// coefficient computation is duplicated per instance rather than shared, since it
+// only runs on factor changes, not per-sample.
+//
+// DELAY_SAMPLES_BASE is a fixed base-rate-equivalent group delay for the combined
+// upsample+downsample FIR round trip -- by construction, independent of which
+// factor (2x/4x) is active, matching the JSFX's "budgets by construction" pattern.
+class PolyphaseOversampler
+{
+public:
+    static constexpr int delaySamplesBase = 121;
+    static constexpr int maxFactor        = 4;
+    static constexpr int maxNumTaps       = delaySamplesBase * maxFactor + 1;
+    static constexpr int rawHistLen       = delaySamplesBase + 1;
+
+    PolyphaseOversampler()
+    {
+        rawHist.assign ((size_t) (2 * rawHistLen), 0.0);
+        downBuf.assign ((size_t) (2 * maxNumTaps), 0.0);
+        setFactor (2);
+    }
+
+    // factor must be 2 or 4 (JSFX os_choice: 0 -> 2x, 1 -> 4x).
+    void setFactor (int newFactor)
+    {
+        factor = (newFactor <= 2) ? 2 : 4;
+        numTaps = delaySamplesBase * factor + 1;
+        computeCoeffs();
+        reset();
+    }
+
+    void reset()
+    {
+        std::fill (rawHist.begin(), rawHist.end(), 0.0);
+        std::fill (downBuf.begin(), downBuf.end(), 0.0);
+        histWritePos = 0;
+        downWritePos = 0;
+    }
+
+    int getFactor() const noexcept  { return factor; }
+    int getNumTaps() const noexcept { return numTaps; }
+
+    // Upsamples one base-rate input sample into `factor` oversampled-rate samples,
+    // written into upsampledOut[0 .. factor).
+    void upsample (double input, double* upsampledOut)
+    {
+        rawHist[(size_t) histWritePos] = input * factor;
+        rawHist[(size_t) (histWritePos + rawHistLen)] = input * factor;
+        const int histBase = histWritePos + rawHistLen;
+
+        for (int j = 0; j < factor; ++j)
+            upsampledOut[j] = polyUp (histBase, j);
+
+        histWritePos = (histWritePos + 1) % rawHistLen;
+    }
+
+    // Pushes the j-th oversampled-rate sample of this host sample (j in
+    // [0, factor)) into the decimation buffer. Only j == 0 actually produces a
+    // decimated output -- matching the JSFX, which convolves once per host sample
+    // (the other factor-1 phases are computed and discarded by construction of
+    // decimation, so there's no point running the FIR sum for them).
+    double downsample (int j, double value)
+    {
+        downBuf[(size_t) downWritePos] = value;
+        downBuf[(size_t) (downWritePos + numTaps)] = value;
+
+        const double out = (j == 0) ? downConvolve() : 0.0;
+
+        downWritePos = (downWritePos + 1) % numTaps;
+        return out;
+    }
+
+private:
+    double polyUp (int basePos, int phase) const
+    {
+        double sum = 0.0;
+        int i = 0;
+        int tapIdx = phase;
+        while (tapIdx < numTaps)
+        {
+            sum += coeffs[(size_t) tapIdx] * rawHist[(size_t) (basePos - i)];
+            tapIdx += factor;
+            ++i;
+        }
+        return sum;
+    }
+
+    double downConvolve() const
+    {
+        const int rs = downWritePos + 1;
+        double sum = 0.0;
+        for (int i = 0; i < numTaps; ++i)
+            sum += coeffs[(size_t) i] * downBuf[(size_t) (rs + i)];
+        return sum;
+    }
+
+    void computeCoeffs()
+    {
+        constexpr double pi = 3.14159265358979323846;
+        const double twoPi = 2.0 * pi;
+        const double fc = 1.0 / (2.0 * factor);
+        const double center = (numTaps - 1) / 2.0;
+
+        coeffs.assign ((size_t) numTaps, 0.0);
+        double sum = 0.0;
+
+        for (int n = 0; n < numTaps; ++n)
+        {
+            const double m = n - center;
+            const double sincVal = (std::abs (m) < 0.5)
+                                        ? (2.0 * fc)
+                                        : (std::sin (twoPi * fc * m) / (pi * m));
+            const double window = 0.42 - 0.5 * std::cos (twoPi * n / (numTaps - 1))
+                                        + 0.08 * std::cos (2.0 * twoPi * n / (numTaps - 1));
+            coeffs[(size_t) n] = sincVal * window;
+            sum += coeffs[(size_t) n];
+        }
+
+        for (auto& c : coeffs)
+            c /= sum;
+    }
+
+    int factor = 2;
+    int numTaps = delaySamplesBase * 2 + 1;
+    int histWritePos = 0;
+    int downWritePos = 0;
+
+    std::vector<double> coeffs;
+    std::vector<double> rawHist;
+    std::vector<double> downBuf;
+};

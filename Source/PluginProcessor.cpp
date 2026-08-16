@@ -1,5 +1,6 @@
 #include "PluginProcessor.h"
-#include "PluginEditor.h"
+
+#include <cmath>
 
 //==============================================================================
 WishcraftMasteringLimiterAudioProcessor::WishcraftMasteringLimiterAudioProcessor()
@@ -7,6 +8,12 @@ WishcraftMasteringLimiterAudioProcessor::WishcraftMasteringLimiterAudioProcessor
                        .withInput  ("Input",  juce::AudioChannelSet::stereo(), true)
                        .withOutput ("Output", juce::AudioChannelSet::stereo(), true))
 {
+    // JSFX slider1:os_choice=1<0,1,1{2x,4x}> -- default index 1 is "4x".
+    addParameter (osChoiceParam = new juce::AudioParameterChoice (
+        juce::ParameterID { "os_choice", 1 },
+        "Oversampling Factor",
+        juce::StringArray { "2x", "4x" },
+        1));
 }
 
 WishcraftMasteringLimiterAudioProcessor::~WishcraftMasteringLimiterAudioProcessor()
@@ -68,7 +75,14 @@ void WishcraftMasteringLimiterAudioProcessor::changeProgramName (int index, cons
 //==============================================================================
 void WishcraftMasteringLimiterAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
-    juce::ignoreUnused (sampleRate, samplesPerBlock);
+    juce::ignoreUnused (samplesPerBlock);
+
+    currentSampleRate = sampleRate;
+    lookaheadL.prepare (sampleRate);
+    lookaheadR.prepare (sampleRate);
+
+    currentOsChoiceIndex = -1; // forces reconfigureEngine() to run on the first block
+    reconfigureEngine (osChoiceParam->getIndex());
 }
 
 void WishcraftMasteringLimiterAudioProcessor::releaseResources()
@@ -77,14 +91,37 @@ void WishcraftMasteringLimiterAudioProcessor::releaseResources()
 
 bool WishcraftMasteringLimiterAudioProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
 {
-    if (layouts.getMainOutputChannelSet() != juce::AudioChannelSet::mono()
-     && layouts.getMainOutputChannelSet() != juce::AudioChannelSet::stereo())
-        return false;
+    // The JSFX declares exactly two in_pin/out_pin (left/right) -- fixed stereo
+    // I/O, no mono option -- so the port matches that rather than allowing mono.
+    return layouts.getMainInputChannelSet()  == juce::AudioChannelSet::stereo()
+        && layouts.getMainOutputChannelSet() == juce::AudioChannelSet::stereo();
+}
 
-    if (layouts.getMainOutputChannelSet() != layouts.getMainInputChannelSet())
-        return false;
+// JSFX @slider's (os_choice != last_os_choice) check, run at the top of the block
+// instead since JUCE has no per-parameter-change callback guarantee as tight as
+// REAPER's @slider -- functionally the same "only reconfigure when it actually
+// changed" behaviour reconfigure()/@init implement.
+void WishcraftMasteringLimiterAudioProcessor::reconfigureEngine (int osChoiceIndex)
+{
+    currentOsChoiceIndex = osChoiceIndex;
+    const int factor = (osChoiceIndex == 0) ? 2 : 4;
 
-    return true;
+    oversamplerL.setFactor (factor);
+    oversamplerR.setFactor (factor);
+
+    // JSFX reconfigure(): LA_BUDGET_BASE = ceil(lookahead_ms * 0.001 * srate);
+    // la_buf_size = LA_BUDGET_BASE * factor.
+    const int laBudgetBase = (int) std::ceil (lookaheadMsStage3 * 0.001 * currentSampleRate);
+    const int laBufSize = laBudgetBase * factor;
+    lookaheadL.setActiveLength (laBufSize);
+    lookaheadR.setActiveLength (laBufSize);
+
+    // JSFX @block: pdc_delay = DELAY_SAMPLES_BASE + CHAR_BUDGET_BASE + LA_BUDGET_BASE.
+    // CHAR_BUDGET_BASE (the Selective Clipper's buffer) isn't ported yet, so this
+    // stage's reported latency is smaller than the full JSFX's by exactly that
+    // amount until a later stage adds it. Factor-independent by construction, same
+    // as the JSFX -- switching 2x/4x never changes the reported latency.
+    setLatencySamples (PolyphaseOversampler::delaySamplesBase + laBudgetBase);
 }
 
 void WishcraftMasteringLimiterAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
@@ -93,13 +130,46 @@ void WishcraftMasteringLimiterAudioProcessor::processBlock (juce::AudioBuffer<fl
     juce::ignoreUnused (midiMessages);
     juce::ScopedNoDenormals noDenormals;
 
-    // Stage 1 scaffold: plain bypass. The input buffer is left untouched, so
-    // output equals input unmodified. DSP porting starts in a later stage.
-    auto totalNumInputChannels  = getTotalNumInputChannels();
-    auto totalNumOutputChannels = getTotalNumOutputChannels();
+    const int osChoiceIndex = osChoiceParam->getIndex();
+    if (osChoiceIndex != currentOsChoiceIndex)
+        reconfigureEngine (osChoiceIndex);
 
-    for (auto i = totalNumInputChannels; i < totalNumOutputChannels; ++i)
-        buffer.clear (i, 0, buffer.getNumSamples());
+    jassert (buffer.getNumChannels() == 2);
+    auto* left  = buffer.getWritePointer (0);
+    auto* right = buffer.getWritePointer (1);
+
+    const int factor = oversamplerL.getFactor();
+    double upL[PolyphaseOversampler::maxFactor];
+    double upR[PolyphaseOversampler::maxFactor];
+
+    for (int n = 0; n < buffer.getNumSamples(); ++n)
+    {
+        oversamplerL.upsample ((double) left[n],  upL);
+        oversamplerR.upsample ((double) right[n], upR);
+
+        double outL = 0.0, outR = 0.0;
+
+        for (int j = 0; j < factor; ++j)
+        {
+            // Stage 3 scaffold: the Limiter's lookahead buffer is ported as a pure
+            // delay line -- no gain reduction, clipping, or Selective Clipper yet,
+            // so the signal passes through unmodified aside from the delay itself.
+            const double stageL = lookaheadL.process (upL[j]);
+            const double stageR = lookaheadR.process (upR[j]);
+
+            const double downL = oversamplerL.downsample (j, stageL);
+            const double downR = oversamplerR.downsample (j, stageR);
+
+            if (j == 0)
+            {
+                outL = downL;
+                outR = downR;
+            }
+        }
+
+        left[n]  = (float) outL;
+        right[n] = (float) outR;
+    }
 }
 
 //==============================================================================
@@ -110,7 +180,10 @@ bool WishcraftMasteringLimiterAudioProcessor::hasEditor() const
 
 juce::AudioProcessorEditor* WishcraftMasteringLimiterAudioProcessor::createEditor()
 {
-    return new WishcraftMasteringLimiterAudioProcessorEditor (*this);
+    // No custom GUI this session -- JUCE's stock generic editor is enough to
+    // switch os_choice (2x/4x) for null testing, without writing any bespoke
+    // GUI code ahead of the later GUI stage.
+    return new juce::GenericAudioProcessorEditor (*this);
 }
 
 //==============================================================================
