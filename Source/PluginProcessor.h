@@ -4,6 +4,7 @@
 
 #include "DSP/Limiter.h"
 #include "DSP/PolyphaseOversampler.h"
+#include "DSP/SafetyClip.h"
 #include "DSP/SelectiveClipper.h"
 
 //==============================================================================
@@ -62,8 +63,8 @@ private:
     juce::AudioParameterFloat* releaseParam = nullptr;
     // JSFX slider8: input_gain_db -- Input Gain (Drive), after Selective Clipper, before Limiter.
     juce::AudioParameterFloat* inputGainParam = nullptr;
-    // JSFX slider9: output_ceiling_db -- True Peak Output Ceiling (only used this stage to
-    // cap Limiter Auto Gain; the safety clip itself isn't ported yet).
+    // JSFX slider9: output_ceiling_db -- True Peak Output Ceiling. Caps Limiter Auto Gain
+    // and sets the two-stage Safety Clip's ceiling (ceiling - ISP_MARGIN_DB).
     juce::AudioParameterFloat* outputCeilingParam = nullptr;
     // JSFX slider10: link_pct -- Stereo Link.
     juce::AudioParameterFloat* linkParam = nullptr;
@@ -75,6 +76,10 @@ private:
     // path); see Limiter.h for why the Limiter's isn't strictly detector-only.
     juce::AudioParameterFloat* scLowShelfParam = nullptr;
     juce::AudioParameterFloat* scHighShelfParam = nullptr;
+    // JSFX slider13: bypass -- latency-compensated Bypass. Priority order is
+    // Bypass > Delta > Normal; Delta (listen_mode) isn't ported yet, so this session it's
+    // effectively Bypass > Normal.
+    juce::AudioParameterBool* bypassParam = nullptr;
 
     // TEMPORARY (Stage 4 only): read-only gain-reduction readout so GR can be verified by
     // eye before any real metering/GUI exists. Updated once per block, not per sample.
@@ -84,6 +89,7 @@ private:
     PolyphaseOversampler oversamplerL, oversamplerR;
     SelectiveClipper selectiveClipper;
     Limiter limiter;
+    SafetyClip safetyClip; // one shared instance -- safety_ceiling_lin is a single scalar in the JSFX, not per-channel
 
     int currentOsChoiceIndex = -1; // forces a reconfigure on the first block
     double currentSampleRate = 44100.0;

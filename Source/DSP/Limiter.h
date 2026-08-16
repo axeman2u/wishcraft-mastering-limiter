@@ -122,6 +122,13 @@ public:
 
     int getLaBudgetBase() const noexcept { return laBudgetBase; }
 
+    // The single, shared output_ceiling_smoothed value -- also needed by the Safety Clip
+    // stage (safety_ceiling_lin = 10^((output_ceiling_smoothed - ISP_MARGIN_DB)/20)) and
+    // by Bypass's post-downsample backstop, both outside this class. Exposed rather than
+    // having those re-derive/re-smooth their own copy, matching the JSFX's single global
+    // output_ceiling_smoothed used everywhere it's needed.
+    double getOutputCeilingSmoothed() const noexcept { return outputCeilingSmoothed; }
+
     // JSFX @sample (top-of-block section): ceiling/output-ceiling/input-gain ramp one-pole
     // per host sample; release_fast_ms/release_slow_ms and link_frac are recomputed every
     // host sample directly from their raw slider values (cheap linear maps, no smoothing
@@ -157,9 +164,13 @@ public:
     // Clipper's (undelayed-further) dry reference, used only as Auto Gain's peak-ratio
     // comparison point -- matches the JSFX using dry_L/dry_R directly rather than a
     // Limiter-delayed copy, since apply_makeup's slow peak followers don't need
-    // sample-accurate alignment.
+    // sample-accurate alignment. dryRawL/dryRawR are ALSO returned: dry_L/dry_R (the
+    // Selective Clipper's raw, un-gained dry reference) delayed by this Limiter's own
+    // la_buf_size, matching the JSFX's dry_raw_la_L/R -- Bypass's true-passthrough
+    // reference, latency-matched to the full chain but never touched by Input Gain,
+    // Sidechain EQ, or gain reduction.
     void processTick (double makeupL, double makeupR, double dryL, double dryR,
-                       double& outL, double& outR)
+                       double& outL, double& outR, double& dryRawL, double& dryRawR)
     {
         const double gL = makeupL * inputGainLin;
         const double gR = makeupR * inputGainLin;
@@ -176,6 +187,9 @@ public:
 
         const double limL = limiterApply (left.laBuf,  limSigL, finalGrL);
         const double limR = limiterApply (right.laBuf, limSigR, finalGrR);
+
+        dryRawL = bareDelay (left.laDryRawBuf,  dryL);
+        dryRawR = bareDelay (right.laDryRawBuf, dryR);
 
         wposLa = (wposLa + 1) % laBufSize;
 
@@ -204,6 +218,7 @@ private:
     struct Channel
     {
         std::vector<double> laBuf;
+        std::vector<double> laDryRawBuf;
         double grSmoothedDb = 0.0, grHistoryDb = 0.0;
         SidechainFilter sidechain;
         double fullGainPeakDry = 0.0, fullGainPeakChar = 0.0;
@@ -211,11 +226,13 @@ private:
         void prepareCapacity (int maxBufAlloc)
         {
             laBuf.assign ((size_t) maxBufAlloc, 0.0);
+            laDryRawBuf.assign ((size_t) maxBufAlloc, 0.0);
         }
 
         void reset (int activeBufSize)
         {
             std::fill (laBuf.begin(), laBuf.begin() + activeBufSize, 0.0);
+            std::fill (laDryRawBuf.begin(), laDryRawBuf.begin() + activeBufSize, 0.0);
             grSmoothedDb = 0.0;
             grHistoryDb = 0.0;
             sidechain = {};
@@ -260,6 +277,14 @@ private:
         laBuf[(size_t) wposLa] = val;
         const double grLinear = std::pow (10.0, grDb / 20.0);
         return delayed * grLinear;
+    }
+
+    // Matches bare_delay(): plain read-then-write circular delay, no gain involved.
+    double bareDelay (std::vector<double>& buf, double val)
+    {
+        const double out = buf[(size_t) wposLa];
+        buf[(size_t) wposLa] = val;
+        return out;
     }
 
     //==============================================================================

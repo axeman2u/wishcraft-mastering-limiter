@@ -51,7 +51,6 @@ WishcraftMasteringLimiterAudioProcessor::WishcraftMasteringLimiterAudioProcessor
         0.0f));
 
     // JSFX slider9:output_ceiling_db=-1<-3,0,0.01>-True Peak Output Ceiling (safety clip)
-    // -- only used this stage to cap Limiter Auto Gain; the safety clip itself is a later stage.
     addParameter (outputCeilingParam = new juce::AudioParameterFloat (
         juce::ParameterID { "output_ceiling_db", 1 },
         "True Peak Output Ceiling",
@@ -84,6 +83,12 @@ WishcraftMasteringLimiterAudioProcessor::WishcraftMasteringLimiterAudioProcessor
         "Sidechain High Shelf",
         juce::NormalisableRange<float> (-6.0f, 6.0f, 0.1f),
         0.0f));
+
+    // JSFX slider13:bypass=0<0,1,1{Off,On}>-Bypass (latency-compensated)
+    addParameter (bypassParam = new juce::AudioParameterBool (
+        juce::ParameterID { "bypass", 1 },
+        "Bypass",
+        false));
 
     // TEMPORARY (Stage 4 only): read-only GR readout, updated once per block. Marked
     // non-automatable since it's an output, not a control -- will be replaced by a real
@@ -176,6 +181,9 @@ void WishcraftMasteringLimiterAudioProcessor::prepareToPlay (double sampleRate, 
                                        (double) inputGainParam->get(),
                                        (double) scLowShelfParam->get(),
                                        (double) scHighShelfParam->get());
+    // JSFX @init: safety_ceiling_lin is first computed in @sample from the already-
+    // correct (non-ramped) output_ceiling_smoothed set just above -- matching that here.
+    safetyClip.setOutputCeilingSmoothed ((double) outputCeilingParam->get());
 
     currentOsChoiceIndex = -1; // forces reconfigureEngine() to run on the first block
     reconfigureEngine (osChoiceParam->getIndex());
@@ -249,35 +257,67 @@ void WishcraftMasteringLimiterAudioProcessor::processBlock (juce::AudioBuffer<fl
                                 (double) outputCeilingParam->get(),
                                 limiterAutoGainParam->get(),
                                 scLowShelfDb, scHighShelfDb);
+        // safety_ceiling_lin is derived from the same output_ceiling_smoothed the
+        // Limiter just updated above -- pulled from there rather than re-smoothed here.
+        safetyClip.setOutputCeilingSmoothed (limiter.getOutputCeilingSmoothed());
+        const bool bypassOn = bypassParam->get();
 
         oversamplerL.upsample ((double) left[n],  upL);
         oversamplerR.upsample ((double) right[n], upR);
 
         double outL = 0.0, outR = 0.0;
+        double outDryRawL = 0.0, outDryRawR = 0.0;
 
         for (int j = 0; j < factor; ++j)
         {
-            // Stage 5: Selective Clipper (with its own Sidechain EQ detector) -> Input
-            // Gain -> Limiter (with its own Sidechain EQ detector) -- straight to output,
-            // no safety clipping yet.
+            // Stage 6: Selective Clipper -> Input Gain -> Limiter -> two-stage Safety
+            // Clip. The Bypass raw-dry path is computed every tick regardless of Bypass
+            // state (matching the JSFX's "full wet path always runs" design, just
+            // without its CPU-optimization of skipping the unused downsample FIR).
             double clipL, clipR, dryL, dryR;
             selectiveClipper.processTick (upL[j], upR[j], clipL, clipR, dryL, dryR);
 
-            double stageL, stageR;
-            limiter.processTick (clipL, clipR, dryL, dryR, stageL, stageR);
+            double stageL, stageR, dryRawL, dryRawR;
+            limiter.processTick (clipL, clipR, dryL, dryR, stageL, stageR, dryRawL, dryRawR);
+
+            // Oversampled-domain safety clip -- applied only to the processed signal,
+            // not the raw-dry Bypass reference (matches the JSFX exactly).
+            stageL = safetyClip.clip (stageL);
+            stageR = safetyClip.clip (stageR);
 
             const double downL = oversamplerL.downsample (j, stageL);
             const double downR = oversamplerR.downsample (j, stageR);
+            const double downRawL = oversamplerL.downsampleSecondary (j, dryRawL);
+            const double downRawR = oversamplerR.downsampleSecondary (j, dryRawR);
 
             if (j == 0)
             {
                 outL = downL;
                 outR = downR;
+                outDryRawL = downRawL;
+                outDryRawR = downRawR;
             }
         }
 
-        left[n]  = (float) outL;
-        right[n] = (float) outR;
+        // Post-downsample backstop clip -- both paths, so whichever one gets selected
+        // below is already correctly clipped.
+        outL = safetyClip.clip (outL);
+        outR = safetyClip.clip (outR);
+        outDryRawL = safetyClip.clip (outDryRawL);
+        outDryRawR = safetyClip.clip (outDryRawR);
+
+        // Bypass > Delta > Normal. Delta (listen_mode) isn't ported yet, so this
+        // reduces to Bypass > Normal for now.
+        if (bypassOn)
+        {
+            left[n]  = (float) outDryRawL;
+            right[n] = (float) outDryRawR;
+        }
+        else
+        {
+            left[n]  = (float) outL;
+            right[n] = (float) outR;
+        }
     }
 
     // TEMPORARY (Stage 4 only): push the last block's final (post-Link) GR to the

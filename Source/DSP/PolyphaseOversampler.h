@@ -25,6 +25,7 @@ public:
     {
         rawHist.assign ((size_t) (2 * rawHistLen), 0.0);
         downBuf.assign ((size_t) (2 * maxNumTaps), 0.0);
+        downBuf2.assign ((size_t) (2 * maxNumTaps), 0.0);
         setFactor (2);
     }
 
@@ -41,8 +42,10 @@ public:
     {
         std::fill (rawHist.begin(), rawHist.end(), 0.0);
         std::fill (downBuf.begin(), downBuf.end(), 0.0);
+        std::fill (downBuf2.begin(), downBuf2.end(), 0.0);
         histWritePos = 0;
         downWritePos = 0;
+        downWritePos2 = 0;
     }
 
     int getFactor() const noexcept  { return factor; }
@@ -78,6 +81,25 @@ public:
         return out;
     }
 
+    // A second, independent decimation stream sharing this instance's coefficients but
+    // with its own buffer/position -- matches the JSFX's pattern of multiple down_bufs
+    // (down_bufL, down_dry_bufL, down_dry_raw_bufL, ...) all sharing coeffs/wpos_down.
+    // Rather than trying to share a single write position across call sites, this keeps
+    // its own downWritePos2 that simply advances in lockstep (same j, same call count
+    // per host sample as the primary downsample()) -- always numerically identical to
+    // downWritePos, just decoupled so callers don't have to interleave calls carefully.
+    // Used for Bypass's raw-dry reference (out_dry_raw_L/R).
+    double downsampleSecondary (int j, double value)
+    {
+        downBuf2[(size_t) downWritePos2] = value;
+        downBuf2[(size_t) (downWritePos2 + numTaps)] = value;
+
+        const double out = (j == 0) ? downConvolveSecondary() : 0.0;
+
+        downWritePos2 = (downWritePos2 + 1) % numTaps;
+        return out;
+    }
+
 private:
     double polyUp (int basePos, int phase) const
     {
@@ -99,6 +121,15 @@ private:
         double sum = 0.0;
         for (int i = 0; i < numTaps; ++i)
             sum += coeffs[(size_t) i] * downBuf[(size_t) (rs + i)];
+        return sum;
+    }
+
+    double downConvolveSecondary() const
+    {
+        const int rs = downWritePos2 + 1;
+        double sum = 0.0;
+        for (int i = 0; i < numTaps; ++i)
+            sum += coeffs[(size_t) i] * downBuf2[(size_t) (rs + i)];
         return sum;
     }
 
@@ -132,8 +163,10 @@ private:
     int numTaps = delaySamplesBase * 2 + 1;
     int histWritePos = 0;
     int downWritePos = 0;
+    int downWritePos2 = 0;
 
     std::vector<double> coeffs;
     std::vector<double> rawHist;
     std::vector<double> downBuf;
+    std::vector<double> downBuf2;
 };
