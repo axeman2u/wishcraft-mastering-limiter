@@ -2,8 +2,8 @@
 
 #include <juce_audio_processors/juce_audio_processors.h>
 
-#include "DSP/LookaheadDelayLine.h"
 #include "DSP/PolyphaseOversampler.h"
+#include "DSP/SelectiveClipper.h"
 
 //==============================================================================
 class WishcraftMasteringLimiterAudioProcessor final : public juce::AudioProcessor
@@ -49,17 +49,15 @@ private:
     //==============================================================================
     void reconfigureEngine (int osChoiceIndex);
 
-    // JSFX slider1: os_choice (0 = 2x, 1 = 4x). This is the only parameter this
-    // stage exposes, so the oversampling factor can be A/B'd during null testing.
+    // JSFX slider1: os_choice (0 = 2x, 1 = 4x).
     juce::AudioParameterChoice* osChoiceParam = nullptr;
+    // JSFX slider2: threshold_db -- Selective Clip Threshold.
+    juce::AudioParameterFloat* thresholdParam = nullptr;
+    // JSFX slider3: character -- Selectivity (0 = Transparent .. 100 = Aggressive).
+    juce::AudioParameterFloat* selectivityParam = nullptr;
 
     PolyphaseOversampler oversamplerL, oversamplerR;
-    LookaheadDelayLine   lookaheadL,   lookaheadR;
-
-    // JSFX slider6 (lookahead_ms) default -- Stage 3+ turns this into a real
-    // parameter; until then the lookahead buffer is sized as if it were fixed here,
-    // matching what a freshly-loaded, untouched JSFX instance would use.
-    static constexpr double lookaheadMsStage3 = 3.0;
+    SelectiveClipper selectiveClipper;
 
     int currentOsChoiceIndex = -1; // forces a reconfigure on the first block
     double currentSampleRate = 44100.0;

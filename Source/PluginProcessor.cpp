@@ -14,6 +14,20 @@ WishcraftMasteringLimiterAudioProcessor::WishcraftMasteringLimiterAudioProcessor
         "Oversampling Factor",
         juce::StringArray { "2x", "4x" },
         1));
+
+    // JSFX slider2:threshold_db=-3<-24,0,0.01>-Selective Clip Threshold (dB)
+    addParameter (thresholdParam = new juce::AudioParameterFloat (
+        juce::ParameterID { "threshold_db", 1 },
+        "Selective Clip Threshold",
+        juce::NormalisableRange<float> (-24.0f, 0.0f, 0.01f),
+        -3.0f));
+
+    // JSFX slider3:character=50<0,100,0.1>-Selectivity (0=Transparent .. 100=Aggressive)
+    addParameter (selectivityParam = new juce::AudioParameterFloat (
+        juce::ParameterID { "selectivity", 1 },
+        "Selectivity",
+        juce::NormalisableRange<float> (0.0f, 100.0f, 0.1f),
+        50.0f));
 }
 
 WishcraftMasteringLimiterAudioProcessor::~WishcraftMasteringLimiterAudioProcessor()
@@ -78,8 +92,9 @@ void WishcraftMasteringLimiterAudioProcessor::prepareToPlay (double sampleRate, 
     juce::ignoreUnused (samplesPerBlock);
 
     currentSampleRate = sampleRate;
-    lookaheadL.prepare (sampleRate);
-    lookaheadR.prepare (sampleRate);
+    selectiveClipper.prepare (sampleRate);
+    // JSFX @init: threshold_smoothed = threshold_db (no ramp-in on load).
+    selectiveClipper.setInitialThreshold ((double) thresholdParam->get());
 
     currentOsChoiceIndex = -1; // forces reconfigureEngine() to run on the first block
     reconfigureEngine (osChoiceParam->getIndex());
@@ -105,23 +120,18 @@ void WishcraftMasteringLimiterAudioProcessor::reconfigureEngine (int osChoiceInd
 {
     currentOsChoiceIndex = osChoiceIndex;
     const int factor = (osChoiceIndex == 0) ? 2 : 4;
+    const double osRate = currentSampleRate * factor;
 
     oversamplerL.setFactor (factor);
     oversamplerR.setFactor (factor);
-
-    // JSFX reconfigure(): LA_BUDGET_BASE = ceil(lookahead_ms * 0.001 * srate);
-    // la_buf_size = LA_BUDGET_BASE * factor.
-    const int laBudgetBase = (int) std::ceil (lookaheadMsStage3 * 0.001 * currentSampleRate);
-    const int laBufSize = laBudgetBase * factor;
-    lookaheadL.setActiveLength (laBufSize);
-    lookaheadR.setActiveLength (laBufSize);
+    selectiveClipper.setFactor (factor, osRate);
 
     // JSFX @block: pdc_delay = DELAY_SAMPLES_BASE + CHAR_BUDGET_BASE + LA_BUDGET_BASE.
-    // CHAR_BUDGET_BASE (the Selective Clipper's buffer) isn't ported yet, so this
+    // The Limiter's own lookahead buffer (LA_BUDGET_BASE) isn't ported yet, so this
     // stage's reported latency is smaller than the full JSFX's by exactly that
-    // amount until a later stage adds it. Factor-independent by construction, same
-    // as the JSFX -- switching 2x/4x never changes the reported latency.
-    setLatencySamples (PolyphaseOversampler::delaySamplesBase + laBudgetBase);
+    // amount until the Limiter stage adds it. Factor-independent by construction,
+    // same as the JSFX -- switching 2x/4x never changes the reported latency.
+    setLatencySamples (PolyphaseOversampler::delaySamplesBase + selectiveClipper.getCharBudgetBase());
 }
 
 void WishcraftMasteringLimiterAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
@@ -144,6 +154,10 @@ void WishcraftMasteringLimiterAudioProcessor::processBlock (juce::AudioBuffer<fl
 
     for (int n = 0; n < buffer.getNumSamples(); ++n)
     {
+        // JSFX @sample (top-of-block): threshold/selectivity recomputed once per host
+        // sample, reused across all `factor` oversampled ticks below.
+        selectiveClipper.setParameters ((double) thresholdParam->get(), (double) selectivityParam->get());
+
         oversamplerL.upsample ((double) left[n],  upL);
         oversamplerR.upsample ((double) right[n], upR);
 
@@ -151,11 +165,10 @@ void WishcraftMasteringLimiterAudioProcessor::processBlock (juce::AudioBuffer<fl
 
         for (int j = 0; j < factor; ++j)
         {
-            // Stage 3 scaffold: the Limiter's lookahead buffer is ported as a pure
-            // delay line -- no gain reduction, clipping, or Selective Clipper yet,
-            // so the signal passes through unmodified aside from the delay itself.
-            const double stageL = lookaheadL.process (upL[j]);
-            const double stageR = lookaheadR.process (upR[j]);
+            // Stage 3: Selective Clipper only -- straight to output, no Input Gain,
+            // Limiter, Sidechain EQ, or safety clipping yet.
+            double stageL, stageR;
+            selectiveClipper.processTick (upL[j], upR[j], stageL, stageR);
 
             const double downL = oversamplerL.downsample (j, stageL);
             const double downR = oversamplerR.downsample (j, stageR);
