@@ -52,11 +52,27 @@ private:
     //==============================================================================
     void reconfigureEngine (int osChoiceIndex);
 
+    static juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
+
+    // Single source of truth for every processor parameter -- the 14 JSFX sliders plus
+    // the TEMPORARY debug meter readouts (see Metering.h), all registered through one
+    // ParameterLayout (createParameterLayout()) rather than the old mixed addParameter()
+    // calls, so host automation and getStateInformation/setStateInformation both work
+    // correctly for the whole parameter set, not just some of it.
+    juce::AudioProcessorValueTreeState apvts;
+
+    // Cached typed pointers into apvts's own parameter objects, looked up once in the
+    // constructor body (apvts.getParameter(id)) -- every existing call site
+    // (thresholdParam->get(), osChoiceParam->getIndex(), etc.) stays unchanged from
+    // before the APVTS migration, while now going through APVTS for automation/save-load.
+    //
     // JSFX slider1: os_choice (0 = 2x, 1 = 4x).
     juce::AudioParameterChoice* osChoiceParam = nullptr;
     // JSFX slider2: threshold_db -- Selective Clip Threshold.
     juce::AudioParameterFloat* thresholdParam = nullptr;
-    // JSFX slider3: character -- Selectivity (0 = Transparent .. 100 = Aggressive).
+    // JSFX slider3: character -- labeled "Selectivity" in the UI (the underlying JSFX
+    // slider variable is "character"; the GUI section itself is called "Selective
+    // Clipper", but the control it holds is the selectivity/aggressiveness setting).
     juce::AudioParameterFloat* selectivityParam = nullptr;
     // JSFX slider5: ceiling_db -- Limiter Ceiling.
     juce::AudioParameterFloat* ceilingParam = nullptr;
@@ -72,8 +88,8 @@ private:
     juce::AudioParameterFloat* outputCeilingParam = nullptr;
     // JSFX slider10: link_pct -- Stereo Link.
     juce::AudioParameterFloat* linkParam = nullptr;
-    // JSFX slider14: limiter_auto_gain -- Limiter Auto Gain (user-toggleable, unlike the
-    // Selective Clipper's permanently-on Auto Makeup Gain).
+    // JSFX slider14: limiter_auto_gain -- Limiter Auto Gain (user-toggleable, unlike
+    // the Selective Clipper's permanently-on Auto Makeup Gain).
     juce::AudioParameterBool* limiterAutoGainParam = nullptr;
     // JSFX slider11/12: sc_low_shelf_db/sc_high_shelf_db -- Sidechain EQ. Feeds two
     // separate filter instances (Selective Clipper's detector, Limiter's detector/audio
@@ -85,13 +101,22 @@ private:
     // effectively Bypass > Normal.
     juce::AudioParameterBool* bypassParam = nullptr;
 
+    // JSFX slider4 (listen_mode) and slider6 (lookahead_ms) are registered in
+    // createParameterLayout() -- with the JSFX's exact range/default -- so they're
+    // properly automatable and save/load correctly, but neither is cached as a raw
+    // pointer here because nothing reads them yet: Delta Listen Mode's audio processing
+    // isn't ported (matches the existing Bypass-priority note above), and Limiter.h
+    // still sizes its lookahead buffer from its own fixed lookaheadMsFixed=3.0 constant
+    // rather than this parameter (their defaults match, so leaving both at default is
+    // behaviorally identical to before this stage). A future stage that ports either
+    // feature should add the corresponding cached pointer then.
+
     // TEMPORARY debug readouts, updated once per block: no real GUI/meter display exists
     // yet, so these ride JUCE's generic parameter list as a way to verify the numbers.
     // The real values live in Metering's atomics (metering.getGrHeldL(), etc.) -- these
-    // parameters just mirror them for visibility. grMeterL/R now source from the Held
+    // parameters just mirror them for visibility. grMeterL/R source from the Held
     // (peak-hold) value, not the live GR, matching the spec's "text readouts show the
-    // held value" requirement -- Stage 4's placeholder used the live value since Metering
-    // didn't exist yet.
+    // held value" requirement.
     juce::AudioParameterFloat* grMeterLParam = nullptr;
     juce::AudioParameterFloat* grMeterRParam = nullptr;
     juce::AudioParameterFloat* peakMeterLParam = nullptr;

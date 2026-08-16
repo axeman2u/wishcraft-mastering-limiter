@@ -6,45 +6,113 @@
 WishcraftMasteringLimiterAudioProcessor::WishcraftMasteringLimiterAudioProcessor()
      : AudioProcessor (BusesProperties()
                        .withInput  ("Input",  juce::AudioChannelSet::stereo(), true)
-                       .withOutput ("Output", juce::AudioChannelSet::stereo(), true))
+                       .withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
+       apvts (*this, nullptr, "PARAMETERS", createParameterLayout())
 {
-    // JSFX slider1:os_choice=1<0,1,1{2x,4x}> -- default index 1 is "4x".
-    addParameter (osChoiceParam = new juce::AudioParameterChoice (
+    osChoiceParam        = dynamic_cast<juce::AudioParameterChoice*> (apvts.getParameter ("os_choice"));
+    thresholdParam       = dynamic_cast<juce::AudioParameterFloat*>  (apvts.getParameter ("threshold_db"));
+    selectivityParam     = dynamic_cast<juce::AudioParameterFloat*>  (apvts.getParameter ("selectivity"));
+    ceilingParam         = dynamic_cast<juce::AudioParameterFloat*>  (apvts.getParameter ("ceiling_db"));
+    releaseParam         = dynamic_cast<juce::AudioParameterFloat*>  (apvts.getParameter ("release_pct"));
+    inputGainParam       = dynamic_cast<juce::AudioParameterFloat*>  (apvts.getParameter ("input_gain_db"));
+    outputCeilingParam   = dynamic_cast<juce::AudioParameterFloat*>  (apvts.getParameter ("output_ceiling_db"));
+    linkParam            = dynamic_cast<juce::AudioParameterFloat*>  (apvts.getParameter ("link_pct"));
+    limiterAutoGainParam = dynamic_cast<juce::AudioParameterBool*>   (apvts.getParameter ("limiter_auto_gain"));
+    scLowShelfParam      = dynamic_cast<juce::AudioParameterFloat*>  (apvts.getParameter ("sc_low_shelf_db"));
+    scHighShelfParam     = dynamic_cast<juce::AudioParameterFloat*>  (apvts.getParameter ("sc_high_shelf_db"));
+    bypassParam          = dynamic_cast<juce::AudioParameterBool*>   (apvts.getParameter ("bypass"));
+
+    grMeterLParam       = dynamic_cast<juce::AudioParameterFloat*> (apvts.getParameter ("gr_meter_l"));
+    grMeterRParam       = dynamic_cast<juce::AudioParameterFloat*> (apvts.getParameter ("gr_meter_r"));
+    peakMeterLParam     = dynamic_cast<juce::AudioParameterFloat*> (apvts.getParameter ("peak_meter_l"));
+    peakMeterRParam     = dynamic_cast<juce::AudioParameterFloat*> (apvts.getParameter ("peak_meter_r"));
+    charMeterLParam     = dynamic_cast<juce::AudioParameterFloat*> (apvts.getParameter ("char_meter_l"));
+    charMeterRParam     = dynamic_cast<juce::AudioParameterFloat*> (apvts.getParameter ("char_meter_r"));
+    dynamicRangeParam   = dynamic_cast<juce::AudioParameterFloat*> (apvts.getParameter ("dynamic_range_db"));
+    lufsParam           = dynamic_cast<juce::AudioParameterFloat*> (apvts.getParameter ("lufs_st"));
+    overYellowParam     = dynamic_cast<juce::AudioParameterBool*>  (apvts.getParameter ("over_yellow"));
+    overRedParam        = dynamic_cast<juce::AudioParameterBool*>  (apvts.getParameter ("over_red"));
+
+    jassert (osChoiceParam != nullptr && thresholdParam != nullptr && selectivityParam != nullptr
+             && ceilingParam != nullptr && releaseParam != nullptr && inputGainParam != nullptr
+             && outputCeilingParam != nullptr && linkParam != nullptr && limiterAutoGainParam != nullptr
+             && scLowShelfParam != nullptr && scHighShelfParam != nullptr && bypassParam != nullptr
+             && grMeterLParam != nullptr && grMeterRParam != nullptr && peakMeterLParam != nullptr
+             && peakMeterRParam != nullptr && charMeterLParam != nullptr && charMeterRParam != nullptr
+             && dynamicRangeParam != nullptr && lufsParam != nullptr && overYellowParam != nullptr
+             && overRedParam != nullptr);
+}
+
+// All 14 JSFX sliders, each matching its slider line's range/default exactly, plus the
+// TEMPORARY debug meter readouts -- registered together in one ParameterLayout so a
+// single AudioProcessorValueTreeState (see PluginProcessor.h) is the sole owner of every
+// processor parameter, giving correct host automation and state save/load for all of
+// them (previously only get/setStateInformation were stubbed out -- nothing was actually
+// saved or restored).
+juce::AudioProcessorValueTreeState::ParameterLayout WishcraftMasteringLimiterAudioProcessor::createParameterLayout()
+{
+    juce::AudioProcessorValueTreeState::ParameterLayout layout;
+
+    // JSFX slider1:os_choice=1<0,1,1{2x,4x}>-Oversampling Factor
+    layout.add (std::make_unique<juce::AudioParameterChoice> (
         juce::ParameterID { "os_choice", 1 },
         "Oversampling Factor",
         juce::StringArray { "2x", "4x" },
         1));
 
     // JSFX slider2:threshold_db=-3<-24,0,0.01>-Selective Clip Threshold (dB)
-    addParameter (thresholdParam = new juce::AudioParameterFloat (
+    layout.add (std::make_unique<juce::AudioParameterFloat> (
         juce::ParameterID { "threshold_db", 1 },
         "Selective Clip Threshold",
         juce::NormalisableRange<float> (-24.0f, 0.0f, 0.01f),
         -3.0f));
 
     // JSFX slider3:character=50<0,100,0.1>-Selectivity (0=Transparent .. 100=Aggressive)
-    addParameter (selectivityParam = new juce::AudioParameterFloat (
+    // -- the JSFX slider variable is "character"; the UI label (and this param's name)
+    // is "Selectivity", matching the "Selective Clipper" GUI section's actual control.
+    layout.add (std::make_unique<juce::AudioParameterFloat> (
         juce::ParameterID { "selectivity", 1 },
         "Selectivity",
         juce::NormalisableRange<float> (0.0f, 100.0f, 0.1f),
         50.0f));
 
+    // JSFX slider4:listen_mode=0<0,1,1{Normal,Delta (what was removed)}>-Listen Mode --
+    // registered for correct automation/state save-load; Delta Listen Mode's actual
+    // audio processing isn't ported yet (see PluginProcessor.h), so this has no audible
+    // effect until that stage.
+    layout.add (std::make_unique<juce::AudioParameterChoice> (
+        juce::ParameterID { "listen_mode", 1 },
+        "Listen Mode",
+        juce::StringArray { "Normal", "Delta (what was removed)" },
+        0));
+
     // JSFX slider5:ceiling_db=-1<-18,0,0.01>-Limiter Ceiling (dB)
-    addParameter (ceilingParam = new juce::AudioParameterFloat (
+    layout.add (std::make_unique<juce::AudioParameterFloat> (
         juce::ParameterID { "ceiling_db", 1 },
         "Limiter Ceiling",
         juce::NormalisableRange<float> (-18.0f, 0.0f, 0.01f),
         -1.0f));
 
+    // JSFX slider6:lookahead_ms=3<0.5,20,0.1>-Limiter Lookahead (ms) -- registered for
+    // correct automation/state save-load; Limiter.h still sizes its lookahead buffer
+    // from its own fixed lookaheadMsFixed=3.0 constant (matching this parameter's
+    // default) rather than reading this value, so it has no audible effect yet (see
+    // PluginProcessor.h).
+    layout.add (std::make_unique<juce::AudioParameterFloat> (
+        juce::ParameterID { "lookahead_ms", 1 },
+        "Limiter Lookahead",
+        juce::NormalisableRange<float> (0.5f, 20.0f, 0.1f),
+        3.0f));
+
     // JSFX slider7:release_pct=30<0,100,0.1>-Release
-    addParameter (releaseParam = new juce::AudioParameterFloat (
+    layout.add (std::make_unique<juce::AudioParameterFloat> (
         juce::ParameterID { "release_pct", 1 },
         "Release",
         juce::NormalisableRange<float> (0.0f, 100.0f, 0.1f),
         30.0f));
 
     // JSFX slider8:input_gain_db=0<0,24,0.1>-Input Gain (Drive)
-    addParameter (inputGainParam = new juce::AudioParameterFloat (
+    layout.add (std::make_unique<juce::AudioParameterFloat> (
         juce::ParameterID { "input_gain_db", 1 },
         "Input Gain (Drive)",
         juce::NormalisableRange<float> (0.0f, 24.0f, 0.1f),
@@ -54,43 +122,43 @@ WishcraftMasteringLimiterAudioProcessor::WishcraftMasteringLimiterAudioProcessor
     // -- displayed as "Peak Ceiling": the Safety Clip guarantees the discrete sample
     // peak, not a certified true/inter-sample-peak bound (see Limiter.h's ISP_MARGIN_DB
     // comment), so the display name doesn't claim more than what's actually delivered.
-    addParameter (outputCeilingParam = new juce::AudioParameterFloat (
+    layout.add (std::make_unique<juce::AudioParameterFloat> (
         juce::ParameterID { "output_ceiling_db", 1 },
         "Peak Ceiling",
         juce::NormalisableRange<float> (-3.0f, 0.0f, 0.01f),
         -1.0f));
 
     // JSFX slider10:link_pct=75<0,100,0.1>-Stereo Link
-    addParameter (linkParam = new juce::AudioParameterFloat (
+    layout.add (std::make_unique<juce::AudioParameterFloat> (
         juce::ParameterID { "link_pct", 1 },
         "Stereo Link",
         juce::NormalisableRange<float> (0.0f, 100.0f, 0.1f),
         75.0f));
 
-    // JSFX slider14:limiter_auto_gain=0<0,1,1{Off,On}>-Limiter Auto Gain
-    addParameter (limiterAutoGainParam = new juce::AudioParameterBool (
-        juce::ParameterID { "limiter_auto_gain", 1 },
-        "Limiter Auto Gain",
-        false));
-
     // JSFX slider11:sc_low_shelf_db=0<-6,6,0.1>-Sidechain Low Shelf (dB)
-    addParameter (scLowShelfParam = new juce::AudioParameterFloat (
+    layout.add (std::make_unique<juce::AudioParameterFloat> (
         juce::ParameterID { "sc_low_shelf_db", 1 },
         "Sidechain Low Shelf",
         juce::NormalisableRange<float> (-6.0f, 6.0f, 0.1f),
         0.0f));
 
     // JSFX slider12:sc_high_shelf_db=0<-6,6,0.1>-Sidechain High Shelf (dB)
-    addParameter (scHighShelfParam = new juce::AudioParameterFloat (
+    layout.add (std::make_unique<juce::AudioParameterFloat> (
         juce::ParameterID { "sc_high_shelf_db", 1 },
         "Sidechain High Shelf",
         juce::NormalisableRange<float> (-6.0f, 6.0f, 0.1f),
         0.0f));
 
     // JSFX slider13:bypass=0<0,1,1{Off,On}>-Bypass (latency-compensated)
-    addParameter (bypassParam = new juce::AudioParameterBool (
+    layout.add (std::make_unique<juce::AudioParameterBool> (
         juce::ParameterID { "bypass", 1 },
         "Bypass",
+        false));
+
+    // JSFX slider14:limiter_auto_gain=0<0,1,1{Off,On}>-Limiter Auto Gain
+    layout.add (std::make_unique<juce::AudioParameterBool> (
+        juce::ParameterID { "limiter_auto_gain", 1 },
+        "Limiter Auto Gain",
         false));
 
     // TEMPORARY debug readouts, updated once per block. Marked non-automatable since
@@ -98,53 +166,53 @@ WishcraftMasteringLimiterAudioProcessor::WishcraftMasteringLimiterAudioProcessor
     // stage exists. Values shown are the HELD (peak-hold) readings, matching the spec's
     // "text readouts show the held value, not the live one".
     auto meterAttributes = juce::AudioParameterFloatAttributes().withAutomatable (false);
-    addParameter (grMeterLParam = new juce::AudioParameterFloat (
+    layout.add (std::make_unique<juce::AudioParameterFloat> (
         juce::ParameterID { "gr_meter_l", 1 },
         "GR Meter L (dB)",
         juce::NormalisableRange<float> (-24.0f, 0.0f, 0.01f),
         0.0f,
         meterAttributes));
-    addParameter (grMeterRParam = new juce::AudioParameterFloat (
+    layout.add (std::make_unique<juce::AudioParameterFloat> (
         juce::ParameterID { "gr_meter_r", 1 },
         "GR Meter R (dB)",
         juce::NormalisableRange<float> (-24.0f, 0.0f, 0.01f),
         0.0f,
         meterAttributes));
 
-    addParameter (peakMeterLParam = new juce::AudioParameterFloat (
+    layout.add (std::make_unique<juce::AudioParameterFloat> (
         juce::ParameterID { "peak_meter_l", 1 },
         "Peak Meter L (dB)",
         juce::NormalisableRange<float> (-60.0f, 12.0f, 0.01f),
         -60.0f,
         meterAttributes));
-    addParameter (peakMeterRParam = new juce::AudioParameterFloat (
+    layout.add (std::make_unique<juce::AudioParameterFloat> (
         juce::ParameterID { "peak_meter_r", 1 },
         "Peak Meter R (dB)",
         juce::NormalisableRange<float> (-60.0f, 12.0f, 0.01f),
         -60.0f,
         meterAttributes));
 
-    addParameter (charMeterLParam = new juce::AudioParameterFloat (
+    layout.add (std::make_unique<juce::AudioParameterFloat> (
         juce::ParameterID { "char_meter_l", 1 },
         "Selective Clip Activity L (dB)",
         juce::NormalisableRange<float> (0.0f, 24.0f, 0.01f),
         0.0f,
         meterAttributes));
-    addParameter (charMeterRParam = new juce::AudioParameterFloat (
+    layout.add (std::make_unique<juce::AudioParameterFloat> (
         juce::ParameterID { "char_meter_r", 1 },
         "Selective Clip Activity R (dB)",
         juce::NormalisableRange<float> (0.0f, 24.0f, 0.01f),
         0.0f,
         meterAttributes));
 
-    addParameter (dynamicRangeParam = new juce::AudioParameterFloat (
+    layout.add (std::make_unique<juce::AudioParameterFloat> (
         juce::ParameterID { "dynamic_range_db", 1 },
         "Dynamic Range (dB)",
         juce::NormalisableRange<float> (0.0f, 30.0f, 0.01f),
         0.0f,
         meterAttributes));
 
-    addParameter (lufsParam = new juce::AudioParameterFloat (
+    layout.add (std::make_unique<juce::AudioParameterFloat> (
         juce::ParameterID { "lufs_st", 1 },
         "Short-Term LUFS",
         juce::NormalisableRange<float> (-70.0f, 0.0f, 0.01f),
@@ -152,16 +220,18 @@ WishcraftMasteringLimiterAudioProcessor::WishcraftMasteringLimiterAudioProcessor
         meterAttributes));
 
     auto boolMeterAttributes = juce::AudioParameterBoolAttributes().withAutomatable (false);
-    addParameter (overYellowParam = new juce::AudioParameterBool (
+    layout.add (std::make_unique<juce::AudioParameterBool> (
         juce::ParameterID { "over_yellow", 1 },
         "Peak Over (Ceiling)",
         false,
         boolMeterAttributes));
-    addParameter (overRedParam = new juce::AudioParameterBool (
+    layout.add (std::make_unique<juce::AudioParameterBool> (
         juce::ParameterID { "over_red", 1 },
         "Peak Over (0 dBFS)",
         false,
         boolMeterAttributes));
+
+    return layout;
 }
 
 WishcraftMasteringLimiterAudioProcessor::~WishcraftMasteringLimiterAudioProcessor()
@@ -207,12 +277,27 @@ int WishcraftMasteringLimiterAudioProcessor::getCurrentProgram()
 void WishcraftMasteringLimiterAudioProcessor::setCurrentProgram (int index)
 {
     juce::ignoreUnused (index);
+
+    // The single "program" slot exists only because some AU hosts don't cope well with
+    // reporting 0 programs (see getNumPrograms()) -- the JSFX has no programs/presets
+    // concept at all, so rather than leaving this a no-op that looks like a broken
+    // preset in the host's menu, selecting it resets every real control (the 14 JSFX
+    // sliders, not the debug meter readouts) back to its JSFX default value, matching
+    // what a freshly-loaded, untouched JSFX instance would show.
+    static constexpr const char* realParamIds[] = {
+        "os_choice", "threshold_db", "selectivity", "listen_mode", "ceiling_db",
+        "lookahead_ms", "release_pct", "input_gain_db", "output_ceiling_db", "link_pct",
+        "sc_low_shelf_db", "sc_high_shelf_db", "bypass", "limiter_auto_gain"
+    };
+    for (auto* id : realParamIds)
+        if (auto* param = apvts.getParameter (id))
+            param->setValueNotifyingHost (param->getDefaultValue());
 }
 
 const juce::String WishcraftMasteringLimiterAudioProcessor::getProgramName (int index)
 {
     juce::ignoreUnused (index);
-    return {};
+    return "Default";
 }
 
 void WishcraftMasteringLimiterAudioProcessor::changeProgramName (int index, const juce::String& newName)
@@ -440,12 +525,16 @@ juce::AudioProcessorEditor* WishcraftMasteringLimiterAudioProcessor::createEdito
 //==============================================================================
 void WishcraftMasteringLimiterAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
 {
-    juce::ignoreUnused (destData);
+    const auto state = apvts.copyState();
+    const std::unique_ptr<juce::XmlElement> xml (state.createXml());
+    copyXmlToBinary (*xml, destData);
 }
 
 void WishcraftMasteringLimiterAudioProcessor::setStateInformation (const void* data, int sizeInBytes)
 {
-    juce::ignoreUnused (data, sizeInBytes);
+    const std::unique_ptr<juce::XmlElement> xmlState (getXmlFromBinary (data, sizeInBytes));
+    if (xmlState != nullptr && xmlState->hasTagName (apvts.state.getType()))
+        apvts.replaceState (juce::ValueTree::fromXml (*xmlState));
 }
 
 //==============================================================================
