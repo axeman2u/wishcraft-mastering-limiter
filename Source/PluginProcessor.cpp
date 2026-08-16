@@ -71,6 +71,20 @@ WishcraftMasteringLimiterAudioProcessor::WishcraftMasteringLimiterAudioProcessor
         "Limiter Auto Gain",
         false));
 
+    // JSFX slider11:sc_low_shelf_db=0<-6,6,0.1>-Sidechain Low Shelf (dB)
+    addParameter (scLowShelfParam = new juce::AudioParameterFloat (
+        juce::ParameterID { "sc_low_shelf_db", 1 },
+        "Sidechain Low Shelf",
+        juce::NormalisableRange<float> (-6.0f, 6.0f, 0.1f),
+        0.0f));
+
+    // JSFX slider12:sc_high_shelf_db=0<-6,6,0.1>-Sidechain High Shelf (dB)
+    addParameter (scHighShelfParam = new juce::AudioParameterFloat (
+        juce::ParameterID { "sc_high_shelf_db", 1 },
+        "Sidechain High Shelf",
+        juce::NormalisableRange<float> (-6.0f, 6.0f, 0.1f),
+        0.0f));
+
     // TEMPORARY (Stage 4 only): read-only GR readout, updated once per block. Marked
     // non-automatable since it's an output, not a control -- will be replaced by a real
     // meter once the GUI stage exists.
@@ -154,11 +168,14 @@ void WishcraftMasteringLimiterAudioProcessor::prepareToPlay (double sampleRate, 
     selectiveClipper.prepare (sampleRate);
     // JSFX @init: threshold_smoothed = threshold_db (no ramp-in on load).
     selectiveClipper.setInitialThreshold ((double) thresholdParam->get());
+    selectiveClipper.setInitialShelf ((double) scLowShelfParam->get(), (double) scHighShelfParam->get());
 
     limiter.prepare (sampleRate);
     limiter.setInitialSmoothedParams ((double) ceilingParam->get(),
                                        (double) outputCeilingParam->get(),
-                                       (double) inputGainParam->get());
+                                       (double) inputGainParam->get(),
+                                       (double) scLowShelfParam->get(),
+                                       (double) scHighShelfParam->get());
 
     currentOsChoiceIndex = -1; // forces reconfigureEngine() to run on the first block
     reconfigureEngine (osChoiceParam->getIndex());
@@ -221,13 +238,17 @@ void WishcraftMasteringLimiterAudioProcessor::processBlock (juce::AudioBuffer<fl
     {
         // JSFX @sample (top-of-block): all these are recomputed once per host sample,
         // reused across all `factor` oversampled ticks below.
-        selectiveClipper.setParameters ((double) thresholdParam->get(), (double) selectivityParam->get());
+        const double scLowShelfDb = (double) scLowShelfParam->get();
+        const double scHighShelfDb = (double) scHighShelfParam->get();
+        selectiveClipper.setParameters ((double) thresholdParam->get(), (double) selectivityParam->get(),
+                                         scLowShelfDb, scHighShelfDb);
         limiter.setParameters ((double) ceilingParam->get(),
                                 (double) releaseParam->get(),
                                 (double) linkParam->get(),
                                 (double) inputGainParam->get(),
                                 (double) outputCeilingParam->get(),
-                                limiterAutoGainParam->get());
+                                limiterAutoGainParam->get(),
+                                scLowShelfDb, scHighShelfDb);
 
         oversamplerL.upsample ((double) left[n],  upL);
         oversamplerR.upsample ((double) right[n], upR);
@@ -236,8 +257,9 @@ void WishcraftMasteringLimiterAudioProcessor::processBlock (juce::AudioBuffer<fl
 
         for (int j = 0; j < factor; ++j)
         {
-            // Stage 4: Selective Clipper -> Input Gain -> Limiter -- straight to output,
-            // no Sidechain EQ or safety clipping yet.
+            // Stage 5: Selective Clipper (with its own Sidechain EQ detector) -> Input
+            // Gain -> Limiter (with its own Sidechain EQ detector) -- straight to output,
+            // no safety clipping yet.
             double clipL, clipR, dryL, dryR;
             selectiveClipper.processTick (upL[j], upR[j], clipL, clipR, dryL, dryR);
 

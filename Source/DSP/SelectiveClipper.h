@@ -51,12 +51,21 @@ public:
         thresholdLin = std::pow (10.0, thresholdSmoothed / 20.0);
     }
 
+    // JSFX @init: sc_low_shelf_smoothed/sc_high_shelf_smoothed = the sliders' actual
+    // current values (no ramp-in on load).
+    void setInitialShelf (double scLowShelfDb, double scHighShelfDb)
+    {
+        scLowShelfSmoothed = scLowShelfDb;
+        scHighShelfSmoothed = scHighShelfDb;
+    }
+
     // JSFX reconfigure(): recomputes everything that depends on factor/sample rate, and
     // clears all state/buffers -- an oversampling factor change is a deliberate hard reset,
     // matching the JSFX.
-    void setFactor (int factor, double osRate)
+    void setFactor (int factor, double newOsRate)
     {
         currentFactor = factor;
+        osRate = newOsRate;
         charBudgetBase = (int) std::ceil (charMaxMs * 0.001 * sampleRate) + (int) charMarginBase;
         charBufSize = charBudgetBase * factor;
 
@@ -64,11 +73,12 @@ public:
         right.reset (charBufSize);
         wposChar = 0;
 
-        // Sidechain EQ hardcoded at 0 dB (not exposed as a parameter this stage) --
-        // structurally identical to the JSFX's sc_filter, just inert until a later stage
-        // exposes the Sidechain EQ gain controls.
-        lowCoeffs = computeLowShelf (scPivotHz, 0.0, osRate);
-        highCoeffs = computeHighShelf (scPivotHz, 0.0, osRate);
+        // Sidechain EQ coefficients depend on os_rate, so recompute them here too (they're
+        // also recomputed every setParameters() call at the current smoothed gain -- this
+        // just ensures they're valid immediately after a factor change, before the first
+        // setParameters() of the new block).
+        lowCoeffs = computeLowShelf (scPivotHz, scLowShelfSmoothed, osRate);
+        highCoeffs = computeHighShelf (scPivotHz, scHighShelfSmoothed, osRate);
 
         makeupAttackCoeff = 1.0 - std::exp (-1.0 / (makeupAttackMs * 0.001 * osRate));
         makeupReleaseCoeff = 1.0 - std::exp (-1.0 / (makeupReleaseMs * 0.001 * osRate));
@@ -76,15 +86,22 @@ public:
 
     int getCharBudgetBase() const noexcept { return charBudgetBase; }
 
-    // JSFX @sample (top-of-block section): threshold_smoothed ramps one-pole per host
-    // sample; dur_thresh_samples is recomputed every host sample directly from the raw
-    // Selectivity value -- deliberately NOT smoothed, since Selectivity is meant to feel
-    // like a mode change, not a continuous glide.
-    void setParameters (double thresholdDb, double selectivityPct)
+    // JSFX @sample (top-of-block section): threshold_smoothed and the Sidechain EQ shelf
+    // gains ramp one-pole per host sample (same shared time constant); shelf coefficients
+    // are recomputed from the freshly-smoothed gain every host sample, same as the JSFX.
+    // dur_thresh_samples is recomputed every host sample directly from the raw Selectivity
+    // value -- deliberately NOT smoothed, since Selectivity is meant to feel like a mode
+    // change, not a continuous glide.
+    void setParameters (double thresholdDb, double selectivityPct, double scLowShelfDb, double scHighShelfDb)
     {
         thresholdSmoothed += (thresholdDb - thresholdSmoothed) * paramSmoothCoeff;
         thresholdLin = std::pow (10.0, thresholdSmoothed / 20.0);
         durThreshSamples = std::floor ((selectivityPct / 100.0) * charBudgetBase + 0.5) * currentFactor;
+
+        scLowShelfSmoothed += (scLowShelfDb - scLowShelfSmoothed) * paramSmoothCoeff;
+        scHighShelfSmoothed += (scHighShelfDb - scHighShelfSmoothed) * paramSmoothCoeff;
+        lowCoeffs = computeLowShelf (scPivotHz, scLowShelfSmoothed, osRate);
+        highCoeffs = computeHighShelf (scPivotHz, scHighShelfSmoothed, osRate);
     }
 
     // One oversampled tick for both channels: sidechain-filtered detection -> duration-
@@ -200,7 +217,7 @@ private:
     //==============================================================================
     Channel left, right;
 
-    double sampleRate = 44100.0;
+    double sampleRate = 44100.0, osRate = 88200.0;
     int currentFactor = 2;
     int charBudgetBase = 1;
     int charBufSize = 1;
@@ -211,6 +228,7 @@ private:
     double durThreshSamples = 0.0;
     double paramSmoothCoeff = 0.0;
 
+    double scLowShelfSmoothed = 0.0, scHighShelfSmoothed = 0.0;
     BiquadCoeffs lowCoeffs, highCoeffs;
     double makeupAttackCoeff = 0.0, makeupReleaseCoeff = 0.0;
 };

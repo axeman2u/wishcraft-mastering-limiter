@@ -15,15 +15,16 @@
 // which the spec places after the Selective Clipper and before the Limiter.
 //
 // The Limiter's own sidechain-filtered detector runs through a SEPARATE filter instance
-// from the Selective Clipper's (per spec, they must not share state) -- hardcoded at 0 dB
-// since Sidechain EQ isn't exposed as a parameter yet, same approach as Stage 3. Notably,
-// the JSFX feeds the SIDECHAIN-FILTERED signal (not the raw post-Drive signal) into the
-// lookahead buffer and back out as the limited audio -- the spec describes Sidechain EQ as
-// "detector-only," but line-for-line the filtered value is literally what gets delayed and
-// gain-reduced. At 0 dB this is an exact identity (see Stage 3's derivation for why), so it
-// has no audible effect yet -- but it means once Sidechain EQ becomes a real, non-zero
-// control, it will color the audio path too, not just detection. Ported as-is rather than
-// "fixed," since that's a JSFX behavior worth flagging, not silently changing.
+// from the Selective Clipper's (per spec, they must not share state), driven by the same
+// two Sidechain EQ sliders. Notably, and confirmed intentional (asked and confirmed with
+// the user in Stage 5), the JSFX feeds the SIDECHAIN-FILTERED signal -- not a separate raw
+// signal -- into the lookahead buffer and back out as the limited audio: the spec describes
+// Sidechain EQ as "detector-only," but line-for-line the filtered value is literally what
+// gets delayed and gain-reduced here. Character's own Sidechain EQ instance IS genuinely
+// detector-only (char_process takes the raw and filtered signals as separate arguments);
+// the Limiter's is not. So moving the Sidechain EQ sliders away from 0 dB WILL audibly
+// color the Limiter's output, not just its detection -- ported to match the JSFX exactly,
+// not "fixed" to a stricter detector-only interpretation.
 //
 // ISP_MARGIN_DB is a fixed constant used only for the Auto Gain cap formula this stage --
 // the true-peak safety clip itself (ISP_MARGIN_DB's main use) isn't ported yet.
@@ -80,12 +81,15 @@ public:
     }
 
     // JSFX @init: *_smoothed = the slider's actual current value (no ramp-in on load).
-    void setInitialSmoothedParams (double ceilingDb, double outputCeilingDb, double inputGainDb)
+    void setInitialSmoothedParams (double ceilingDb, double outputCeilingDb, double inputGainDb,
+                                    double scLowShelfDb, double scHighShelfDb)
     {
         ceilingSmoothed = ceilingDb;
         outputCeilingSmoothed = outputCeilingDb;
         inputGainSmoothed = inputGainDb;
         inputGainLin = std::pow (10.0, inputGainSmoothed / 20.0);
+        scLowShelfSmoothed = scLowShelfDb;
+        scHighShelfSmoothed = scHighShelfDb;
     }
 
     // JSFX reconfigure(): recomputes everything that depends on factor/sample rate, and
@@ -102,12 +106,12 @@ public:
         right.reset (laBufSize);
         wposLa = 0;
 
-        // Sidechain EQ hardcoded at 0 dB (not exposed as a parameter this stage) --
-        // structurally identical to the JSFX's sc_filter, just inert until a later stage
-        // exposes the Sidechain EQ gain controls. Separate coefficient set and separate
-        // biquad instances from the Selective Clipper's, per spec.
-        lowCoeffs = computeLowShelf (scPivotHz, 0.0, osRate);
-        highCoeffs = computeHighShelf (scPivotHz, 0.0, osRate);
+        // Sidechain EQ coefficients depend on os_rate, so recompute them here too (also
+        // recomputed every setParameters() call at the current smoothed gain -- this just
+        // ensures validity immediately after a factor change). Separate coefficient set
+        // and separate biquad instances from the Selective Clipper's, per spec.
+        lowCoeffs = computeLowShelf (scPivotHz, scLowShelfSmoothed, osRate);
+        highCoeffs = computeHighShelf (scPivotHz, scHighShelfSmoothed, osRate);
 
         attackCoeff = 1.0 - std::exp (-1.0 / (attackMs * 0.001 * osRate));
         historyAttackCoeff = 1.0 - std::exp (-1.0 / (historyAttackMs * 0.001 * osRate));
@@ -124,7 +128,8 @@ public:
     // needed of their own -- the JSFX does the same). autoGainOn is a plain on/off switch,
     // read directly with no smoothing, matching the JSFX.
     void setParameters (double ceilingDb, double releasePct, double linkPct,
-                         double inputGainDb, double outputCeilingDb, bool autoGainOnIn)
+                         double inputGainDb, double outputCeilingDb, bool autoGainOnIn,
+                         double scLowShelfDb, double scHighShelfDb)
     {
         ceilingSmoothed += (ceilingDb - ceilingSmoothed) * paramSmoothCoeff;
         outputCeilingSmoothed += (outputCeilingDb - outputCeilingSmoothed) * paramSmoothCoeff;
@@ -139,6 +144,11 @@ public:
 
         // Cap Auto Gain so it cannot restore past the ISP-margin ceiling either.
         autoGainMaxBoostDb = std::max (0.0, (outputCeilingSmoothed - ispMarginDb) - ceilingSmoothed);
+
+        scLowShelfSmoothed += (scLowShelfDb - scLowShelfSmoothed) * paramSmoothCoeff;
+        scHighShelfSmoothed += (scHighShelfDb - scHighShelfSmoothed) * paramSmoothCoeff;
+        lowCoeffs = computeLowShelf (scPivotHz, scLowShelfSmoothed, osRate);
+        highCoeffs = computeHighShelf (scPivotHz, scHighShelfSmoothed, osRate);
     }
 
     // One oversampled tick for both channels: Input Gain -> Limiter's own sidechain-
@@ -271,6 +281,7 @@ private:
     bool autoGainOn = false;
     double paramSmoothCoeff = 0.0;
 
+    double scLowShelfSmoothed = 0.0, scHighShelfSmoothed = 0.0;
     BiquadCoeffs lowCoeffs, highCoeffs;
     double attackCoeff = 0.0, historyAttackCoeff = 0.0, historyDecayCoeff = 0.0;
     double makeupAttackCoeff = 0.0, makeupReleaseCoeff = 0.0;

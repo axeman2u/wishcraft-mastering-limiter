@@ -70,6 +70,11 @@ private:
     // JSFX slider14: limiter_auto_gain -- Limiter Auto Gain (user-toggleable, unlike the
     // Selective Clipper's permanently-on Auto Makeup Gain).
     juce::AudioParameterBool* limiterAutoGainParam = nullptr;
+    // JSFX slider11/12: sc_low_shelf_db/sc_high_shelf_db -- Sidechain EQ. Feeds two
+    // separate filter instances (Selective Clipper's detector, Limiter's detector/audio
+    // path); see Limiter.h for why the Limiter's isn't strictly detector-only.
+    juce::AudioParameterFloat* scLowShelfParam = nullptr;
+    juce::AudioParameterFloat* scHighShelfParam = nullptr;
 
     // TEMPORARY (Stage 4 only): read-only gain-reduction readout so GR can be verified by
     // eye before any real metering/GUI exists. Updated once per block, not per sample.
