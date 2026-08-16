@@ -3,6 +3,7 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 
 #include "DSP/Limiter.h"
+#include "DSP/Metering.h"
 #include "DSP/PolyphaseOversampler.h"
 #include "DSP/SafetyClip.h"
 #include "DSP/SelectiveClipper.h"
@@ -63,8 +64,11 @@ private:
     juce::AudioParameterFloat* releaseParam = nullptr;
     // JSFX slider8: input_gain_db -- Input Gain (Drive), after Selective Clipper, before Limiter.
     juce::AudioParameterFloat* inputGainParam = nullptr;
-    // JSFX slider9: output_ceiling_db -- True Peak Output Ceiling. Caps Limiter Auto Gain
-    // and sets the two-stage Safety Clip's ceiling (ceiling - ISP_MARGIN_DB).
+    // JSFX slider9: output_ceiling_db -- displayed as "Peak Ceiling" (not "True Peak"):
+    // the Safety Clip only guarantees the discrete sample peak exactly, not a certified
+    // inter-sample/true-peak bound, so the name shouldn't claim a stronger guarantee than
+    // what's delivered. Caps Limiter Auto Gain and sets the two-stage Safety Clip's
+    // ceiling (ceiling - ISP_MARGIN_DB).
     juce::AudioParameterFloat* outputCeilingParam = nullptr;
     // JSFX slider10: link_pct -- Stereo Link.
     juce::AudioParameterFloat* linkParam = nullptr;
@@ -81,15 +85,29 @@ private:
     // effectively Bypass > Normal.
     juce::AudioParameterBool* bypassParam = nullptr;
 
-    // TEMPORARY (Stage 4 only): read-only gain-reduction readout so GR can be verified by
-    // eye before any real metering/GUI exists. Updated once per block, not per sample.
+    // TEMPORARY debug readouts, updated once per block: no real GUI/meter display exists
+    // yet, so these ride JUCE's generic parameter list as a way to verify the numbers.
+    // The real values live in Metering's atomics (metering.getGrHeldL(), etc.) -- these
+    // parameters just mirror them for visibility. grMeterL/R now source from the Held
+    // (peak-hold) value, not the live GR, matching the spec's "text readouts show the
+    // held value" requirement -- Stage 4's placeholder used the live value since Metering
+    // didn't exist yet.
     juce::AudioParameterFloat* grMeterLParam = nullptr;
     juce::AudioParameterFloat* grMeterRParam = nullptr;
+    juce::AudioParameterFloat* peakMeterLParam = nullptr;
+    juce::AudioParameterFloat* peakMeterRParam = nullptr;
+    juce::AudioParameterFloat* charMeterLParam = nullptr;
+    juce::AudioParameterFloat* charMeterRParam = nullptr;
+    juce::AudioParameterFloat* dynamicRangeParam = nullptr;
+    juce::AudioParameterFloat* lufsParam = nullptr;
+    juce::AudioParameterBool* overYellowParam = nullptr;
+    juce::AudioParameterBool* overRedParam = nullptr;
 
     PolyphaseOversampler oversamplerL, oversamplerR;
     SelectiveClipper selectiveClipper;
     Limiter limiter;
     SafetyClip safetyClip; // one shared instance -- safety_ceiling_lin is a single scalar in the JSFX, not per-channel
+    Metering metering;
 
     int currentOsChoiceIndex = -1; // forces a reconfigure on the first block
     double currentSampleRate = 44100.0;

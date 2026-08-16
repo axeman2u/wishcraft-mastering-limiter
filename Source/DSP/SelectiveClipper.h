@@ -109,14 +109,19 @@ public:
     // per-tick Character block exactly, including the shared wposChar advance. dryL/dryR
     // are also returned -- the Limiter's own (user-toggleable) Auto Gain uses this same
     // dry reference directly as its peak-ratio comparison point, matching the JSFX using
-    // dry_L/dry_R rather than a further-delayed copy.
-    void processTick (double upL, double upR, double& outL, double& outR, double& dryL, double& dryR)
+    // dry_L/dry_R rather than a further-delayed copy. charL/charR (pre-makeup-gain,
+    // post-clip) are ALSO returned -- the Character Activity meter needs this exact
+    // pair, not outL/outR: Auto Makeup Gain restores level so effectively that comparing
+    // its output to dry understates how much clipping actually happened (matches the
+    // JSFX using dry_L/char_L for this, not makeup_L).
+    void processTick (double upL, double upR, double& outL, double& outR, double& dryL, double& dryR,
+                       double& charL, double& charR)
     {
         const double scCharL = left.sidechain.process (lowCoeffs, highCoeffs, upL);
         const double scCharR = right.sidechain.process (lowCoeffs, highCoeffs, upR);
 
-        const double charL = clipRead (left,  upL, scCharL);
-        const double charR = clipRead (right, upR, scCharR);
+        charL = clipRead (left,  upL, scCharL);
+        charR = clipRead (right, upR, scCharR);
 
         dryL = bareDelay (left.charDryBuf,  upL);
         dryR = bareDelay (right.charDryBuf, upR);

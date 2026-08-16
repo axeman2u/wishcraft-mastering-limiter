@@ -51,9 +51,12 @@ WishcraftMasteringLimiterAudioProcessor::WishcraftMasteringLimiterAudioProcessor
         0.0f));
 
     // JSFX slider9:output_ceiling_db=-1<-3,0,0.01>-True Peak Output Ceiling (safety clip)
+    // -- displayed as "Peak Ceiling": the Safety Clip guarantees the discrete sample
+    // peak, not a certified true/inter-sample-peak bound (see Limiter.h's ISP_MARGIN_DB
+    // comment), so the display name doesn't claim more than what's actually delivered.
     addParameter (outputCeilingParam = new juce::AudioParameterFloat (
         juce::ParameterID { "output_ceiling_db", 1 },
-        "True Peak Output Ceiling",
+        "Peak Ceiling",
         juce::NormalisableRange<float> (-3.0f, 0.0f, 0.01f),
         -1.0f));
 
@@ -90,9 +93,10 @@ WishcraftMasteringLimiterAudioProcessor::WishcraftMasteringLimiterAudioProcessor
         "Bypass",
         false));
 
-    // TEMPORARY (Stage 4 only): read-only GR readout, updated once per block. Marked
-    // non-automatable since it's an output, not a control -- will be replaced by a real
-    // meter once the GUI stage exists.
+    // TEMPORARY debug readouts, updated once per block. Marked non-automatable since
+    // they're outputs, not controls -- will be replaced by a real meter once the GUI
+    // stage exists. Values shown are the HELD (peak-hold) readings, matching the spec's
+    // "text readouts show the held value, not the live one".
     auto meterAttributes = juce::AudioParameterFloatAttributes().withAutomatable (false);
     addParameter (grMeterLParam = new juce::AudioParameterFloat (
         juce::ParameterID { "gr_meter_l", 1 },
@@ -106,6 +110,58 @@ WishcraftMasteringLimiterAudioProcessor::WishcraftMasteringLimiterAudioProcessor
         juce::NormalisableRange<float> (-24.0f, 0.0f, 0.01f),
         0.0f,
         meterAttributes));
+
+    addParameter (peakMeterLParam = new juce::AudioParameterFloat (
+        juce::ParameterID { "peak_meter_l", 1 },
+        "Peak Meter L (dB)",
+        juce::NormalisableRange<float> (-60.0f, 12.0f, 0.01f),
+        -60.0f,
+        meterAttributes));
+    addParameter (peakMeterRParam = new juce::AudioParameterFloat (
+        juce::ParameterID { "peak_meter_r", 1 },
+        "Peak Meter R (dB)",
+        juce::NormalisableRange<float> (-60.0f, 12.0f, 0.01f),
+        -60.0f,
+        meterAttributes));
+
+    addParameter (charMeterLParam = new juce::AudioParameterFloat (
+        juce::ParameterID { "char_meter_l", 1 },
+        "Selective Clip Activity L (dB)",
+        juce::NormalisableRange<float> (0.0f, 24.0f, 0.01f),
+        0.0f,
+        meterAttributes));
+    addParameter (charMeterRParam = new juce::AudioParameterFloat (
+        juce::ParameterID { "char_meter_r", 1 },
+        "Selective Clip Activity R (dB)",
+        juce::NormalisableRange<float> (0.0f, 24.0f, 0.01f),
+        0.0f,
+        meterAttributes));
+
+    addParameter (dynamicRangeParam = new juce::AudioParameterFloat (
+        juce::ParameterID { "dynamic_range_db", 1 },
+        "Dynamic Range (dB)",
+        juce::NormalisableRange<float> (0.0f, 30.0f, 0.01f),
+        0.0f,
+        meterAttributes));
+
+    addParameter (lufsParam = new juce::AudioParameterFloat (
+        juce::ParameterID { "lufs_st", 1 },
+        "Short-Term LUFS",
+        juce::NormalisableRange<float> (-70.0f, 0.0f, 0.01f),
+        -70.0f,
+        meterAttributes));
+
+    auto boolMeterAttributes = juce::AudioParameterBoolAttributes().withAutomatable (false);
+    addParameter (overYellowParam = new juce::AudioParameterBool (
+        juce::ParameterID { "over_yellow", 1 },
+        "Peak Over (Ceiling)",
+        false,
+        boolMeterAttributes));
+    addParameter (overRedParam = new juce::AudioParameterBool (
+        juce::ParameterID { "over_red", 1 },
+        "Peak Over (0 dBFS)",
+        false,
+        boolMeterAttributes));
 }
 
 WishcraftMasteringLimiterAudioProcessor::~WishcraftMasteringLimiterAudioProcessor()
@@ -185,6 +241,8 @@ void WishcraftMasteringLimiterAudioProcessor::prepareToPlay (double sampleRate, 
     // correct (non-ramped) output_ceiling_smoothed set just above -- matching that here.
     safetyClip.setOutputCeilingSmoothed ((double) outputCeilingParam->get());
 
+    metering.prepare (sampleRate);
+
     currentOsChoiceIndex = -1; // forces reconfigureEngine() to run on the first block
     reconfigureEngine (osChoiceParam->getIndex());
 }
@@ -215,6 +273,7 @@ void WishcraftMasteringLimiterAudioProcessor::reconfigureEngine (int osChoiceInd
     oversamplerR.setFactor (factor);
     selectiveClipper.setFactor (factor, osRate);
     limiter.setFactor (factor, osRate);
+    metering.setFactor (osRate);
 
     // JSFX @block: pdc_delay = DELAY_SAMPLES_BASE + CHAR_BUDGET_BASE + LA_BUDGET_BASE.
     // All three contributions are now ported. Factor-independent by construction, same
@@ -267,18 +326,28 @@ void WishcraftMasteringLimiterAudioProcessor::processBlock (juce::AudioBuffer<fl
 
         double outL = 0.0, outR = 0.0;
         double outDryRawL = 0.0, outDryRawR = 0.0;
+        // Last oversampled tick's dry/clipped-pre-makeup pair, for the Character
+        // Activity meter -- matches the JSFX reading dry_L/char_L once per host sample
+        // as whatever they were left at by the final tick of the block.
+        double lastDryL = 0.0, lastDryR = 0.0, lastCharL = 0.0, lastCharR = 0.0;
 
         for (int j = 0; j < factor; ++j)
         {
-            // Stage 6: Selective Clipper -> Input Gain -> Limiter -> two-stage Safety
+            // Stage 7: Selective Clipper -> Input Gain -> Limiter -> two-stage Safety
             // Clip. The Bypass raw-dry path is computed every tick regardless of Bypass
             // state (matching the JSFX's "full wet path always runs" design, just
             // without its CPU-optimization of skipping the unused downsample FIR).
-            double clipL, clipR, dryL, dryR;
-            selectiveClipper.processTick (upL[j], upR[j], clipL, clipR, dryL, dryR);
+            double clipL, clipR, dryL, dryR, charL, charR;
+            selectiveClipper.processTick (upL[j], upR[j], clipL, clipR, dryL, dryR, charL, charR);
+            lastDryL = dryL; lastDryR = dryR; lastCharL = charL; lastCharR = charR;
 
             double stageL, stageR, dryRawL, dryRawR;
             limiter.processTick (clipL, clipR, dryL, dryR, stageL, stageR, dryRawL, dryRawR);
+
+            // Peak meter reads the Limiter's output BEFORE the oversampled-domain
+            // safety clip -- matches the JSFX exactly (tells you how hard the safety
+            // net had to work, not just that it worked).
+            metering.updatePeakTick (stageL, stageR);
 
             // Oversampled-domain safety clip -- applied only to the processed signal,
             // not the raw-dry Bypass reference (matches the JSFX exactly).
@@ -308,22 +377,50 @@ void WishcraftMasteringLimiterAudioProcessor::processBlock (juce::AudioBuffer<fl
 
         // Bypass > Delta > Normal. Delta (listen_mode) isn't ported yet, so this
         // reduces to Bypass > Normal for now.
+        double finalOutL, finalOutR;
         if (bypassOn)
         {
-            left[n]  = (float) outDryRawL;
-            right[n] = (float) outDryRawR;
+            finalOutL = outDryRawL;
+            finalOutR = outDryRawR;
         }
         else
         {
-            left[n]  = (float) outL;
-            right[n] = (float) outR;
+            finalOutL = outL;
+            finalOutR = outR;
         }
+
+        left[n]  = (float) finalOutL;
+        right[n] = (float) finalOutR;
+
+        // Everything else: GR display/hold, Character Activity, all peak-holds, Over
+        // indicators, Dynamic Range, and short-term LUFS (measured on the actual
+        // audible output, so it reflects Bypass too, matching the JSFX).
+        metering.updateOncePerHostSample (limiter.getLastGrL(), limiter.getLastGrR(),
+                                           lastDryL, lastDryR, lastCharL, lastCharR,
+                                           limiter.getOutputCeilingSmoothed(),
+                                           finalOutL, finalOutR);
     }
 
-    // TEMPORARY (Stage 4 only): push the last block's final (post-Link) GR to the
-    // read-only meter parameters so it's visible in REAPER's generic FX param list.
-    grMeterLParam->setValueNotifyingHost (grMeterLParam->range.convertTo0to1 ((float) limiter.getLastGrL()));
-    grMeterRParam->setValueNotifyingHost (grMeterRParam->range.convertTo0to1 ((float) limiter.getLastGrR()));
+    // TEMPORARY: mirror Metering's held/derived values onto the debug readout
+    // parameters so they're visible in REAPER's generic FX param list. Clamped to each
+    // param's declared range before converting -- several of these (Peak, LUFS) are
+    // genuinely unbounded below in the underlying calculation (e.g. the peak meter eases
+    // toward roughly -200dB during silence, matching the JSFX's own floor), but the
+    // debug readout's range only needs to cover the musically-relevant span.
+    auto mirror = [] (juce::AudioParameterFloat* param, float value)
+    {
+        param->setValueNotifyingHost (param->range.convertTo0to1 (juce::jlimit (param->range.start, param->range.end, value)));
+    };
+    mirror (grMeterLParam, metering.getGrHeldL());
+    mirror (grMeterRParam, metering.getGrHeldR());
+    mirror (peakMeterLParam, metering.getPeakHeldL());
+    mirror (peakMeterRParam, metering.getPeakHeldR());
+    mirror (charMeterLParam, metering.getCharHeldL());
+    mirror (charMeterRParam, metering.getCharHeldR());
+    mirror (dynamicRangeParam, metering.getDynamicRangeDb());
+    mirror (lufsParam, metering.getLufsShortTermDb());
+    overYellowParam->setValueNotifyingHost (metering.getOverYellow() ? 1.0f : 0.0f);
+    overRedParam->setValueNotifyingHost (metering.getOverRed() ? 1.0f : 0.0f);
 }
 
 //==============================================================================
