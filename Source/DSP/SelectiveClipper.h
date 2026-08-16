@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "Biquad.h"
+#include "PeakFollowerMakeup.h"
 #include "PolyphaseOversampler.h"
 
 // Ports the JSFX's Selective Clipper ("Character") stage: a duration-gated pre-clip with
@@ -88,8 +89,11 @@ public:
 
     // One oversampled tick for both channels: sidechain-filtered detection -> duration-
     // gated clip -> delay-matched dry reference -> Auto Makeup Gain. Matches the JSFX's
-    // per-tick Character block exactly, including the shared wposChar advance.
-    void processTick (double upL, double upR, double& outL, double& outR)
+    // per-tick Character block exactly, including the shared wposChar advance. dryL/dryR
+    // are also returned -- the Limiter's own (user-toggleable) Auto Gain uses this same
+    // dry reference directly as its peak-ratio comparison point, matching the JSFX using
+    // dry_L/dry_R rather than a further-delayed copy.
+    void processTick (double upL, double upR, double& outL, double& outR, double& dryL, double& dryR)
     {
         const double scCharL = left.sidechain.process (lowCoeffs, highCoeffs, upL);
         const double scCharR = right.sidechain.process (lowCoeffs, highCoeffs, upR);
@@ -97,13 +101,15 @@ public:
         const double charL = clipRead (left,  upL, scCharL);
         const double charR = clipRead (right, upR, scCharR);
 
-        const double dryL = bareDelay (left.charDryBuf,  upL);
-        const double dryR = bareDelay (right.charDryBuf, upR);
+        dryL = bareDelay (left.charDryBuf,  upL);
+        dryR = bareDelay (right.charDryBuf, upR);
 
         wposChar = (wposChar + 1) % charBufSize;
 
-        outL = applyMakeup (left.makeupPeakDry,  left.makeupPeakChar,  dryL, charL);
-        outR = applyMakeup (right.makeupPeakDry, right.makeupPeakChar, dryR, charR);
+        // Character's own Auto Makeup Gain: fixed clamp range [0, 12] dB (never
+        // attenuate, only restore what Character itself took, capped at +12 dB).
+        outL = applyPeakRatioMakeup (left.makeupPeakDry,  left.makeupPeakChar,  dryL, charL, makeupAttackCoeff, makeupReleaseCoeff, 0.0, 12.0);
+        outR = applyPeakRatioMakeup (right.makeupPeakDry, right.makeupPeakChar, dryR, charR, makeupAttackCoeff, makeupReleaseCoeff, 0.0, 12.0);
     }
 
 private:
@@ -189,27 +195,6 @@ private:
         const double out = buf[(size_t) wposChar];
         buf[(size_t) wposChar] = val;
         return out;
-    }
-
-    // Matches apply_makeup() with Character's own fixed clamp range [0, 12] dB (never
-    // attenuate, only restore what Character itself took, capped at +12 dB).
-    double applyMakeup (double& peakDry, double& peakChar, double dryVal, double charVal)
-    {
-        const double dryAbs = std::abs (dryVal);
-        const double charAbs = std::abs (charVal);
-
-        if (dryAbs > peakDry) peakDry += (dryAbs - peakDry) * makeupAttackCoeff;
-        else                  peakDry += (dryAbs - peakDry) * makeupReleaseCoeff;
-
-        if (charAbs > peakChar) peakChar += (charAbs - peakChar) * makeupAttackCoeff;
-        else                    peakChar += (charAbs - peakChar) * makeupReleaseCoeff;
-
-        peakDry = flushDenormal (peakDry);
-        peakChar = flushDenormal (peakChar);
-
-        double gainLin = peakDry / std::max (peakChar, 0.0000001);
-        gainLin = std::min (std::max (gainLin, 1.0 /* 10^(0/20) */), std::pow (10.0, 12.0 / 20.0));
-        return charVal * gainLin;
     }
 
     //==============================================================================

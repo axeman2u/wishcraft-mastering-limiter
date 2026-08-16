@@ -2,6 +2,7 @@
 
 #include <juce_audio_processors/juce_audio_processors.h>
 
+#include "DSP/Limiter.h"
 #include "DSP/PolyphaseOversampler.h"
 #include "DSP/SelectiveClipper.h"
 
@@ -55,9 +56,29 @@ private:
     juce::AudioParameterFloat* thresholdParam = nullptr;
     // JSFX slider3: character -- Selectivity (0 = Transparent .. 100 = Aggressive).
     juce::AudioParameterFloat* selectivityParam = nullptr;
+    // JSFX slider5: ceiling_db -- Limiter Ceiling.
+    juce::AudioParameterFloat* ceilingParam = nullptr;
+    // JSFX slider7: release_pct -- Release.
+    juce::AudioParameterFloat* releaseParam = nullptr;
+    // JSFX slider8: input_gain_db -- Input Gain (Drive), after Selective Clipper, before Limiter.
+    juce::AudioParameterFloat* inputGainParam = nullptr;
+    // JSFX slider9: output_ceiling_db -- True Peak Output Ceiling (only used this stage to
+    // cap Limiter Auto Gain; the safety clip itself isn't ported yet).
+    juce::AudioParameterFloat* outputCeilingParam = nullptr;
+    // JSFX slider10: link_pct -- Stereo Link.
+    juce::AudioParameterFloat* linkParam = nullptr;
+    // JSFX slider14: limiter_auto_gain -- Limiter Auto Gain (user-toggleable, unlike the
+    // Selective Clipper's permanently-on Auto Makeup Gain).
+    juce::AudioParameterBool* limiterAutoGainParam = nullptr;
+
+    // TEMPORARY (Stage 4 only): read-only gain-reduction readout so GR can be verified by
+    // eye before any real metering/GUI exists. Updated once per block, not per sample.
+    juce::AudioParameterFloat* grMeterLParam = nullptr;
+    juce::AudioParameterFloat* grMeterRParam = nullptr;
 
     PolyphaseOversampler oversamplerL, oversamplerR;
     SelectiveClipper selectiveClipper;
+    Limiter limiter;
 
     int currentOsChoiceIndex = -1; // forces a reconfigure on the first block
     double currentSampleRate = 44100.0;

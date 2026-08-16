@@ -28,6 +28,65 @@ WishcraftMasteringLimiterAudioProcessor::WishcraftMasteringLimiterAudioProcessor
         "Selectivity",
         juce::NormalisableRange<float> (0.0f, 100.0f, 0.1f),
         50.0f));
+
+    // JSFX slider5:ceiling_db=-1<-18,0,0.01>-Limiter Ceiling (dB)
+    addParameter (ceilingParam = new juce::AudioParameterFloat (
+        juce::ParameterID { "ceiling_db", 1 },
+        "Limiter Ceiling",
+        juce::NormalisableRange<float> (-18.0f, 0.0f, 0.01f),
+        -1.0f));
+
+    // JSFX slider7:release_pct=30<0,100,0.1>-Release
+    addParameter (releaseParam = new juce::AudioParameterFloat (
+        juce::ParameterID { "release_pct", 1 },
+        "Release",
+        juce::NormalisableRange<float> (0.0f, 100.0f, 0.1f),
+        30.0f));
+
+    // JSFX slider8:input_gain_db=0<0,24,0.1>-Input Gain (Drive)
+    addParameter (inputGainParam = new juce::AudioParameterFloat (
+        juce::ParameterID { "input_gain_db", 1 },
+        "Input Gain (Drive)",
+        juce::NormalisableRange<float> (0.0f, 24.0f, 0.1f),
+        0.0f));
+
+    // JSFX slider9:output_ceiling_db=-1<-3,0,0.01>-True Peak Output Ceiling (safety clip)
+    // -- only used this stage to cap Limiter Auto Gain; the safety clip itself is a later stage.
+    addParameter (outputCeilingParam = new juce::AudioParameterFloat (
+        juce::ParameterID { "output_ceiling_db", 1 },
+        "True Peak Output Ceiling",
+        juce::NormalisableRange<float> (-3.0f, 0.0f, 0.01f),
+        -1.0f));
+
+    // JSFX slider10:link_pct=75<0,100,0.1>-Stereo Link
+    addParameter (linkParam = new juce::AudioParameterFloat (
+        juce::ParameterID { "link_pct", 1 },
+        "Stereo Link",
+        juce::NormalisableRange<float> (0.0f, 100.0f, 0.1f),
+        75.0f));
+
+    // JSFX slider14:limiter_auto_gain=0<0,1,1{Off,On}>-Limiter Auto Gain
+    addParameter (limiterAutoGainParam = new juce::AudioParameterBool (
+        juce::ParameterID { "limiter_auto_gain", 1 },
+        "Limiter Auto Gain",
+        false));
+
+    // TEMPORARY (Stage 4 only): read-only GR readout, updated once per block. Marked
+    // non-automatable since it's an output, not a control -- will be replaced by a real
+    // meter once the GUI stage exists.
+    auto meterAttributes = juce::AudioParameterFloatAttributes().withAutomatable (false);
+    addParameter (grMeterLParam = new juce::AudioParameterFloat (
+        juce::ParameterID { "gr_meter_l", 1 },
+        "GR Meter L (dB)",
+        juce::NormalisableRange<float> (-24.0f, 0.0f, 0.01f),
+        0.0f,
+        meterAttributes));
+    addParameter (grMeterRParam = new juce::AudioParameterFloat (
+        juce::ParameterID { "gr_meter_r", 1 },
+        "GR Meter R (dB)",
+        juce::NormalisableRange<float> (-24.0f, 0.0f, 0.01f),
+        0.0f,
+        meterAttributes));
 }
 
 WishcraftMasteringLimiterAudioProcessor::~WishcraftMasteringLimiterAudioProcessor()
@@ -96,6 +155,11 @@ void WishcraftMasteringLimiterAudioProcessor::prepareToPlay (double sampleRate, 
     // JSFX @init: threshold_smoothed = threshold_db (no ramp-in on load).
     selectiveClipper.setInitialThreshold ((double) thresholdParam->get());
 
+    limiter.prepare (sampleRate);
+    limiter.setInitialSmoothedParams ((double) ceilingParam->get(),
+                                       (double) outputCeilingParam->get(),
+                                       (double) inputGainParam->get());
+
     currentOsChoiceIndex = -1; // forces reconfigureEngine() to run on the first block
     reconfigureEngine (osChoiceParam->getIndex());
 }
@@ -125,13 +189,14 @@ void WishcraftMasteringLimiterAudioProcessor::reconfigureEngine (int osChoiceInd
     oversamplerL.setFactor (factor);
     oversamplerR.setFactor (factor);
     selectiveClipper.setFactor (factor, osRate);
+    limiter.setFactor (factor, osRate);
 
     // JSFX @block: pdc_delay = DELAY_SAMPLES_BASE + CHAR_BUDGET_BASE + LA_BUDGET_BASE.
-    // The Limiter's own lookahead buffer (LA_BUDGET_BASE) isn't ported yet, so this
-    // stage's reported latency is smaller than the full JSFX's by exactly that
-    // amount until the Limiter stage adds it. Factor-independent by construction,
-    // same as the JSFX -- switching 2x/4x never changes the reported latency.
-    setLatencySamples (PolyphaseOversampler::delaySamplesBase + selectiveClipper.getCharBudgetBase());
+    // All three contributions are now ported. Factor-independent by construction, same
+    // as the JSFX -- switching 2x/4x never changes the reported latency.
+    setLatencySamples (PolyphaseOversampler::delaySamplesBase
+                        + selectiveClipper.getCharBudgetBase()
+                        + limiter.getLaBudgetBase());
 }
 
 void WishcraftMasteringLimiterAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
@@ -154,9 +219,15 @@ void WishcraftMasteringLimiterAudioProcessor::processBlock (juce::AudioBuffer<fl
 
     for (int n = 0; n < buffer.getNumSamples(); ++n)
     {
-        // JSFX @sample (top-of-block): threshold/selectivity recomputed once per host
-        // sample, reused across all `factor` oversampled ticks below.
+        // JSFX @sample (top-of-block): all these are recomputed once per host sample,
+        // reused across all `factor` oversampled ticks below.
         selectiveClipper.setParameters ((double) thresholdParam->get(), (double) selectivityParam->get());
+        limiter.setParameters ((double) ceilingParam->get(),
+                                (double) releaseParam->get(),
+                                (double) linkParam->get(),
+                                (double) inputGainParam->get(),
+                                (double) outputCeilingParam->get(),
+                                limiterAutoGainParam->get());
 
         oversamplerL.upsample ((double) left[n],  upL);
         oversamplerR.upsample ((double) right[n], upR);
@@ -165,10 +236,13 @@ void WishcraftMasteringLimiterAudioProcessor::processBlock (juce::AudioBuffer<fl
 
         for (int j = 0; j < factor; ++j)
         {
-            // Stage 3: Selective Clipper only -- straight to output, no Input Gain,
-            // Limiter, Sidechain EQ, or safety clipping yet.
+            // Stage 4: Selective Clipper -> Input Gain -> Limiter -- straight to output,
+            // no Sidechain EQ or safety clipping yet.
+            double clipL, clipR, dryL, dryR;
+            selectiveClipper.processTick (upL[j], upR[j], clipL, clipR, dryL, dryR);
+
             double stageL, stageR;
-            selectiveClipper.processTick (upL[j], upR[j], stageL, stageR);
+            limiter.processTick (clipL, clipR, dryL, dryR, stageL, stageR);
 
             const double downL = oversamplerL.downsample (j, stageL);
             const double downR = oversamplerR.downsample (j, stageR);
@@ -183,6 +257,11 @@ void WishcraftMasteringLimiterAudioProcessor::processBlock (juce::AudioBuffer<fl
         left[n]  = (float) outL;
         right[n] = (float) outR;
     }
+
+    // TEMPORARY (Stage 4 only): push the last block's final (post-Link) GR to the
+    // read-only meter parameters so it's visible in REAPER's generic FX param list.
+    grMeterLParam->setValueNotifyingHost (grMeterLParam->range.convertTo0to1 ((float) limiter.getLastGrL()));
+    grMeterRParam->setValueNotifyingHost (grMeterRParam->range.convertTo0to1 ((float) limiter.getLastGrR()));
 }
 
 //==============================================================================
