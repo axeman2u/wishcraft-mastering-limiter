@@ -87,6 +87,22 @@ public:
         publish (overYellow, false); publish (overRed, false);
         publish (dynamicRangeDb, 0.0f);
         publish (lufsShortTermDb, -70.0f);
+
+        // GUI-only additions (Stage 9): the LIVE ballistics value behind each hold
+        // marker (a meter bar needs both -- the hold is a thin marker line drawn ON
+        // TOP of a moving live-fill bar, not the bar itself, matching the JSFX's
+        // draw_vmeter(live_frac, hold_frac, ...) taking both), per-channel Over flags
+        // (the JSFX draws an independent dot per channel; Stage 7 only published a
+        // combined L||R flag, fine for the debug params but not for two GUI dots), and
+        // the Dynamic Range span's actual min/max (Stage 7 only published the
+        // difference, but the range bar needs to know WHERE on the scale to draw the
+        // span, not just how wide it is).
+        publish (grLiveL, 0.0f); publish (grLiveR, 0.0f);
+        publish (peakLiveL, -60.0f); publish (peakLiveR, -60.0f);
+        publish (charLiveL, 0.0f); publish (charLiveR, 0.0f);
+        publish (overYellowL, false); publish (overYellowR, false);
+        publish (overRedL, false); publish (overRedR, false);
+        publish (dynamicRangeMinDb, 0.0f); publish (dynamicRangeMaxDb, 0.0f);
     }
 
     // Once per oversampled tick: fed from the Limiter's output BEFORE the oversampled-
@@ -176,6 +192,19 @@ public:
         publish (overRed, redL || redR);
         publish (dynamicRangeDb, (float) lraRangeDb);
         publish (lufsShortTermDb, (float) lufsDb);
+
+        publish (grLiveL, (float) left.dispGr);
+        publish (grLiveR, (float) right.dispGr);
+        publish (peakLiveL, (float) left.peakDisp);
+        publish (peakLiveR, (float) right.peakDisp);
+        publish (charLiveL, (float) left.charDisp);
+        publish (charLiveR, (float) right.charDisp);
+        publish (overYellowL, yellowL);
+        publish (overYellowR, yellowR);
+        publish (overRedL, redL);
+        publish (overRedR, redR);
+        publish (dynamicRangeMinDb, (float) lraCombinedMin);
+        publish (dynamicRangeMaxDb, (float) lraCombinedMax);
     }
 
     // Thread-safe reads for the (future) editor.
@@ -189,6 +218,21 @@ public:
     bool  getOverRed() const noexcept { return overRed.load (std::memory_order_relaxed); }
     float getDynamicRangeDb() const noexcept { return dynamicRangeDb.load (std::memory_order_relaxed); }
     float getLufsShortTermDb() const noexcept { return lufsShortTermDb.load (std::memory_order_relaxed); }
+
+    // GUI-only additions (Stage 9) -- see the reset()/updateOncePerHostSample() comments
+    // above for why these exist alongside the held/combined values above.
+    float getGrLiveL() const noexcept { return grLiveL.load (std::memory_order_relaxed); }
+    float getGrLiveR() const noexcept { return grLiveR.load (std::memory_order_relaxed); }
+    float getPeakLiveL() const noexcept { return peakLiveL.load (std::memory_order_relaxed); }
+    float getPeakLiveR() const noexcept { return peakLiveR.load (std::memory_order_relaxed); }
+    float getCharLiveL() const noexcept { return charLiveL.load (std::memory_order_relaxed); }
+    float getCharLiveR() const noexcept { return charLiveR.load (std::memory_order_relaxed); }
+    bool  getOverYellowL() const noexcept { return overYellowL.load (std::memory_order_relaxed); }
+    bool  getOverYellowR() const noexcept { return overYellowR.load (std::memory_order_relaxed); }
+    bool  getOverRedL() const noexcept { return overRedL.load (std::memory_order_relaxed); }
+    bool  getOverRedR() const noexcept { return overRedR.load (std::memory_order_relaxed); }
+    float getDynamicRangeMinDb() const noexcept { return dynamicRangeMinDb.load (std::memory_order_relaxed); }
+    float getDynamicRangeMaxDb() const noexcept { return dynamicRangeMaxDb.load (std::memory_order_relaxed); }
 
 private:
     //==============================================================================
@@ -350,4 +394,11 @@ private:
     std::atomic<bool> overYellow { false }, overRed { false };
     std::atomic<float> dynamicRangeDb { 0.0f };
     std::atomic<float> lufsShortTermDb { -70.0f };
+
+    std::atomic<float> grLiveL { 0.0f }, grLiveR { 0.0f };
+    std::atomic<float> peakLiveL { -60.0f }, peakLiveR { -60.0f };
+    std::atomic<float> charLiveL { 0.0f }, charLiveR { 0.0f };
+    std::atomic<bool> overYellowL { false }, overYellowR { false };
+    std::atomic<bool> overRedL { false }, overRedR { false };
+    std::atomic<float> dynamicRangeMinDb { 0.0f }, dynamicRangeMaxDb { 0.0f };
 };

@@ -2,6 +2,8 @@
 
 #include <cmath>
 
+#include "PluginEditor.h"
+
 //==============================================================================
 WishcraftMasteringLimiterAudioProcessor::WishcraftMasteringLimiterAudioProcessor()
      : AudioProcessor (BusesProperties()
@@ -516,10 +518,7 @@ bool WishcraftMasteringLimiterAudioProcessor::hasEditor() const
 
 juce::AudioProcessorEditor* WishcraftMasteringLimiterAudioProcessor::createEditor()
 {
-    // No custom GUI this session -- JUCE's stock generic editor is enough to
-    // switch os_choice (2x/4x) for null testing, without writing any bespoke
-    // GUI code ahead of the later GUI stage.
-    return new juce::GenericAudioProcessorEditor (*this);
+    return new WishcraftMasteringLimiterAudioProcessorEditor (*this);
 }
 
 //==============================================================================

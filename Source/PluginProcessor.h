@@ -48,6 +48,12 @@ public:
     void getStateInformation (juce::MemoryBlock& destData) override;
     void setStateInformation (const void* data, int sizeInBytes) override;
 
+    //==============================================================================
+    // For the editor: APVTS access to build ParameterAttachments for custom controls,
+    // and read-only access to Metering's atomics for the meter displays.
+    juce::AudioProcessorValueTreeState& getAPVTS() noexcept { return apvts; }
+    const Metering& getMetering() const noexcept { return metering; }
+
 private:
     //==============================================================================
     void reconfigureEngine (int osChoiceIndex);

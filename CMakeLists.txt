@@ -26,7 +26,8 @@ juce_add_plugin(WishcraftMasteringLimiter
 
 target_sources(WishcraftMasteringLimiter
     PRIVATE
-        Source/PluginProcessor.cpp)
+        Source/PluginProcessor.cpp
+        Source/PluginEditor.cpp)
 
 target_compile_definitions(WishcraftMasteringLimiter
     PUBLIC
