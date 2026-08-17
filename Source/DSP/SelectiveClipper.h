@@ -14,15 +14,17 @@
 // char_state / char_flag / char_dry_buf machinery from the JSFX as closely as possible.
 //
 // CHAR_MAX_MS and DELTA_GAIN_DB are fixed internal constants per the spec -- never exposed
-// as parameters. DELTA_GAIN_DB is not yet used by anything (Delta Listen Mode is a later
-// stage); it's defined here now only because the spec calls it out as a constant that must
-// never become a slider.
+// as parameters. DELTA_GAIN_DB is read by PluginProcessor::processBlock to boost Delta
+// Listen Mode's difference signal (dry minus Selective Clipper output) -- it lives here
+// rather than in Limiter.h or PluginProcessor.cpp because it's conceptually part of the
+// Selective Clipper's own contract, matching the JSFX declaring it as a plain top-level
+// constant rather than tying it to any one processing stage.
 class SelectiveClipper
 {
 public:
     static constexpr double charMaxMs      = 5.0;  // JSFX CHAR_MAX_MS
     static constexpr double charMarginBase = 2.0;   // JSFX CHAR_MARGIN_BASE
-    static constexpr double deltaGainDb    = 6.0;    // JSFX DELTA_GAIN_DB (reserved, unused)
+    static constexpr double deltaGainDb    = 6.0;    // JSFX DELTA_GAIN_DB
 
     static constexpr double scPivotHz       = 300.0; // JSFX SC_PIVOT_HZ
     static constexpr double makeupAttackMs  = 5.0;   // JSFX MAKEUP_PEAK_ATTACK_MS

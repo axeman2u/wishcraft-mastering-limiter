@@ -22,6 +22,15 @@
 // functionally-correct came first; a follow-up session can refine the geometry. One
 // deliberate departure from the JSFX throughout: every control's label is centered
 // horizontally over its control, not left-aligned with a fixed offset.
+//
+// Resizing matches the JSFX's own SCALE/OFF_X/OFF_Y scheme: all real content is laid
+// out ONCE at a fixed "design" resolution inside contentComponent, which the window
+// can be resized to any size/aspect ratio freely -- resized() just recomputes a single
+// uniform scale factor (the smaller of width-ratio/height-ratio, clamped to
+// [minScale, maxScale], same bounds as the JSFX's MIN_SCALE/MAX_SCALE) and applies it
+// as an AffineTransform on contentComponent, centered with letterbox/pillarbox margins
+// exactly like the JSFX's OFF_X/OFF_Y -- content always scales uniformly, never
+// stretches non-uniformly to fill a mismatched aspect ratio.
 class WishcraftMasteringLimiterAudioProcessorEditor : public juce::AudioProcessorEditor,
                                                         private juce::Timer
 {
@@ -34,10 +43,21 @@ public:
 
 private:
     void timerCallback() override;
+    void layoutContent();
 
     juce::RangedAudioParameter& rangedParam (const juce::String& id);
 
     WishcraftMasteringLimiterAudioProcessor& processorRef;
+
+    static constexpr int designW = 1000, designH = 640;
+    static constexpr float minScale = 0.5f, maxScale = 3.0f; // matches JSFX MIN_SCALE/MAX_SCALE
+
+    // Holds every real child component, laid out once at (designW, designH) and never
+    // resized itself -- resized() only ever changes its AffineTransform, never its
+    // bounds. Everything below that used to be added directly to the editor now
+    // belongs to this instead.
+    juce::Component contentComponent;
+    juce::Label titleLabel;
 
     // Group panel backgrounds (painted first / sent to back).
     GroupPanel gainGroup { "GAIN" };

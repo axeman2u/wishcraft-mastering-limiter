@@ -103,19 +103,22 @@ private:
     juce::AudioParameterFloat* scLowShelfParam = nullptr;
     juce::AudioParameterFloat* scHighShelfParam = nullptr;
     // JSFX slider13: bypass -- latency-compensated Bypass. Priority order is
-    // Bypass > Delta > Normal; Delta (listen_mode) isn't ported yet, so this session it's
-    // effectively Bypass > Normal.
+    // Bypass > Delta > Normal.
     juce::AudioParameterBool* bypassParam = nullptr;
+    // JSFX slider4: listen_mode -- Delta Listen Mode. See PluginProcessor.cpp's
+    // processBlock for the actual signal-path implementation.
+    juce::AudioParameterChoice* listenModeParam = nullptr;
 
-    // JSFX slider4 (listen_mode) and slider6 (lookahead_ms) are registered in
-    // createParameterLayout() -- with the JSFX's exact range/default -- so they're
-    // properly automatable and save/load correctly, but neither is cached as a raw
-    // pointer here because nothing reads them yet: Delta Listen Mode's audio processing
-    // isn't ported (matches the existing Bypass-priority note above), and Limiter.h
-    // still sizes its lookahead buffer from its own fixed lookaheadMsFixed=3.0 constant
-    // rather than this parameter (their defaults match, so leaving both at default is
-    // behaviorally identical to before this stage). A future stage that ports either
-    // feature should add the corresponding cached pointer then.
+    // JSFX slider6 (lookahead_ms) is registered in createParameterLayout() -- with the
+    // JSFX's exact range/default -- so it's properly automatable and saves/loads
+    // correctly, but isn't cached as a raw pointer here because nothing reads it yet:
+    // Limiter.h still sizes its lookahead buffer from its own fixed
+    // lookaheadMsFixed=3.0 constant rather than this parameter (their defaults match,
+    // so leaving it at default is behaviorally identical). A future stage that wires
+    // this up needs to do more than resize a buffer, too -- the JSFX's own @slider
+    // treats a lookahead_ms change exactly like an os_choice change, triggering a full
+    // reconfigure()/state reset, and it changes the reported PDC latency
+    // (LA_BUDGET_BASE feeds pdc_delay) -- neither of which this port currently does.
 
     // TEMPORARY debug readouts, updated once per block: no real GUI/meter display exists
     // yet, so these ride JUCE's generic parameter list as a way to verify the numbers.

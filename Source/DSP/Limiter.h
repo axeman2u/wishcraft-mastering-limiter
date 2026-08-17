@@ -169,8 +169,33 @@ public:
     // la_buf_size, matching the JSFX's dry_raw_la_L/R -- Bypass's true-passthrough
     // reference, latency-matched to the full chain but never touched by Input Gain,
     // Sidechain EQ, or gain reduction.
+    //
+    // charOnlyDelayedL/R and dryGainedDelayedL/R are ALSO returned, for Delta Listen
+    // Mode: charOnlyDelayedL/R is the GAINED (post Input Gain) Selective Clipper output
+    // (makeupL/makeupR post *inputGainLin, i.e. what the JSFX calls makeup_L after its
+    // own `makeup_L *= input_gain_lin`), delayed by this Limiter's own la_buf_size --
+    // matches the JSFX's charonly_la_L/R exactly, including sharing the SAME wposLa
+    // cycle as everything else here, so it lands time-aligned with limL/outL. The
+    // caller substitutes this in place of the Limiter's own output when Delta is
+    // active (matching the JSFX's `listen_mode > 0.5 ? stage_L = charonly_la_L`),
+    // which is why this is a genuinely separate signal rather than a subtraction
+    // computed here: Delta compares dry against what the SELECTIVE CLIPPER did, not
+    // against the Limiter's gain reduction -- matching the JSFX precisely (this was
+    // gotten wrong on a first read of @sample; the charonly_la_L substitution feeds
+    // the MAIN downsample path, and only the final dry-minus-that difference,
+    // computed by the caller after downsampling, is boosted by DELTA_GAIN_DB).
+    // dryGainedDelayedL/R is the GAINED dry reference (dryL/dryR * inputGainLin),
+    // delayed the same la_buf_size amount -- matches the JSFX's dry_la_L/R, the
+    // subtrahend's other half. This is deliberately a SEPARATE buffer from
+    // laDryRawBuf/dryRawL above (gain-then-delay), not derived from dryRawL by
+    // multiplying with the CURRENT inputGainLin after the fact (delay-then-gain) --
+    // those two only agree once inputGainLin has settled; while Input Gain is
+    // actively ramping they diverge, and the JSFX's own gdry_L = dry_L * input_gain_lin
+    // happens BEFORE the delay, not after.
     void processTick (double makeupL, double makeupR, double dryL, double dryR,
-                       double& outL, double& outR, double& dryRawL, double& dryRawR)
+                       double& outL, double& outR, double& dryRawL, double& dryRawR,
+                       double& charOnlyDelayedL, double& charOnlyDelayedR,
+                       double& dryGainedDelayedL, double& dryGainedDelayedR)
     {
         const double gL = makeupL * inputGainLin;
         const double gR = makeupR * inputGainLin;
@@ -190,6 +215,14 @@ public:
 
         dryRawL = bareDelay (left.laDryRawBuf,  dryL);
         dryRawR = bareDelay (right.laDryRawBuf, dryR);
+
+        charOnlyDelayedL = bareDelay (left.charOnlyLaBuf,  gL);
+        charOnlyDelayedR = bareDelay (right.charOnlyLaBuf, gR);
+
+        const double gDryL = dryL * inputGainLin;
+        const double gDryR = dryR * inputGainLin;
+        dryGainedDelayedL = bareDelay (left.laDryBuf,  gDryL);
+        dryGainedDelayedR = bareDelay (right.laDryBuf, gDryR);
 
         wposLa = (wposLa + 1) % laBufSize;
 
@@ -219,6 +252,8 @@ private:
     {
         std::vector<double> laBuf;
         std::vector<double> laDryRawBuf;
+        std::vector<double> charOnlyLaBuf; // JSFX charonly_la_bufL/R -- Delta's gained Character-only reference
+        std::vector<double> laDryBuf;      // JSFX la_dry_bufL/R -- Delta's gained dry reference
         double grSmoothedDb = 0.0, grHistoryDb = 0.0;
         SidechainFilter sidechain;
         double fullGainPeakDry = 0.0, fullGainPeakChar = 0.0;
@@ -227,12 +262,16 @@ private:
         {
             laBuf.assign ((size_t) maxBufAlloc, 0.0);
             laDryRawBuf.assign ((size_t) maxBufAlloc, 0.0);
+            charOnlyLaBuf.assign ((size_t) maxBufAlloc, 0.0);
+            laDryBuf.assign ((size_t) maxBufAlloc, 0.0);
         }
 
         void reset (int activeBufSize)
         {
             std::fill (laBuf.begin(), laBuf.begin() + activeBufSize, 0.0);
             std::fill (laDryRawBuf.begin(), laDryRawBuf.begin() + activeBufSize, 0.0);
+            std::fill (charOnlyLaBuf.begin(), charOnlyLaBuf.begin() + activeBufSize, 0.0);
+            std::fill (laDryBuf.begin(), laDryBuf.begin() + activeBufSize, 0.0);
             grSmoothedDb = 0.0;
             grHistoryDb = 0.0;
             sidechain = {};

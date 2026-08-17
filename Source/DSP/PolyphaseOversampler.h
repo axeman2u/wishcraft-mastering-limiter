@@ -26,6 +26,7 @@ public:
         rawHist.assign ((size_t) (2 * rawHistLen), 0.0);
         downBuf.assign ((size_t) (2 * maxNumTaps), 0.0);
         downBuf2.assign ((size_t) (2 * maxNumTaps), 0.0);
+        downBuf3.assign ((size_t) (2 * maxNumTaps), 0.0);
         setFactor (2);
     }
 
@@ -43,9 +44,11 @@ public:
         std::fill (rawHist.begin(), rawHist.end(), 0.0);
         std::fill (downBuf.begin(), downBuf.end(), 0.0);
         std::fill (downBuf2.begin(), downBuf2.end(), 0.0);
+        std::fill (downBuf3.begin(), downBuf3.end(), 0.0);
         histWritePos = 0;
         downWritePos = 0;
         downWritePos2 = 0;
+        downWritePos3 = 0;
     }
 
     int getFactor() const noexcept  { return factor; }
@@ -89,14 +92,42 @@ public:
     // per host sample as the primary downsample()) -- always numerically identical to
     // downWritePos, just decoupled so callers don't have to interleave calls carefully.
     // Used for Bypass's raw-dry reference (out_dry_raw_L/R).
-    double downsampleSecondary (int j, double value)
+    //
+    // needsOutput: the buffer WRITE always happens (matches the JSFX's "keep all
+    // downsample buffers filled so mode switches stay seamless with no stutter" --
+    // skipping writes would mean the FIR's internal history is stale/zero the moment
+    // this stream's mode gets switched on, producing an audible glitch for one
+    // numTaps-long window). Only the expensive O(numTaps) convolution itself is
+    // skipped when the caller doesn't currently need this stream's output -- matches
+    // the JSFX's own CPU-optimization comment ("raw-dry FIR only when Bypass active"),
+    // which the spec explicitly says isn't mandatory to replicate but is a real,
+    // low-risk win once a second consumer (downsampleTertiary) made computing every
+    // stream unconditionally add up (confirmed via a 4x-oversampling stutter after
+    // Delta Listen Mode's stream was added on top of this one).
+    double downsampleSecondary (int j, double value, bool needsOutput = true)
     {
         downBuf2[(size_t) downWritePos2] = value;
         downBuf2[(size_t) (downWritePos2 + numTaps)] = value;
 
-        const double out = (j == 0) ? downConvolveSecondary() : 0.0;
+        const double out = (j == 0 && needsOutput) ? downConvolveSecondary() : 0.0;
 
         downWritePos2 = (downWritePos2 + 1) % numTaps;
+        return out;
+    }
+
+    // A third, independent decimation stream, same pattern (and same needsOutput
+    // reasoning) as downsampleSecondary(). Used for Delta Listen Mode's gained-dry
+    // reference (out_dry_L/R) -- needed alongside downsampleSecondary() (Bypass's
+    // raw-dry), not instead of it, since Bypass and Delta each need their own
+    // differently-gained dry signal.
+    double downsampleTertiary (int j, double value, bool needsOutput = true)
+    {
+        downBuf3[(size_t) downWritePos3] = value;
+        downBuf3[(size_t) (downWritePos3 + numTaps)] = value;
+
+        const double out = (j == 0 && needsOutput) ? downConvolveTertiary() : 0.0;
+
+        downWritePos3 = (downWritePos3 + 1) % numTaps;
         return out;
     }
 
@@ -133,6 +164,15 @@ private:
         return sum;
     }
 
+    double downConvolveTertiary() const
+    {
+        const int rs = downWritePos3 + 1;
+        double sum = 0.0;
+        for (int i = 0; i < numTaps; ++i)
+            sum += coeffs[(size_t) i] * downBuf3[(size_t) (rs + i)];
+        return sum;
+    }
+
     void computeCoeffs()
     {
         constexpr double pi = 3.14159265358979323846;
@@ -164,9 +204,11 @@ private:
     int histWritePos = 0;
     int downWritePos = 0;
     int downWritePos2 = 0;
+    int downWritePos3 = 0;
 
     std::vector<double> coeffs;
     std::vector<double> rawHist;
     std::vector<double> downBuf;
     std::vector<double> downBuf2;
+    std::vector<double> downBuf3;
 };

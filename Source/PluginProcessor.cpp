@@ -23,6 +23,7 @@ WishcraftMasteringLimiterAudioProcessor::WishcraftMasteringLimiterAudioProcessor
     scLowShelfParam      = dynamic_cast<juce::AudioParameterFloat*>  (apvts.getParameter ("sc_low_shelf_db"));
     scHighShelfParam     = dynamic_cast<juce::AudioParameterFloat*>  (apvts.getParameter ("sc_high_shelf_db"));
     bypassParam          = dynamic_cast<juce::AudioParameterBool*>   (apvts.getParameter ("bypass"));
+    listenModeParam      = dynamic_cast<juce::AudioParameterChoice*> (apvts.getParameter ("listen_mode"));
 
     grMeterLParam       = dynamic_cast<juce::AudioParameterFloat*> (apvts.getParameter ("gr_meter_l"));
     grMeterRParam       = dynamic_cast<juce::AudioParameterFloat*> (apvts.getParameter ("gr_meter_r"));
@@ -39,6 +40,7 @@ WishcraftMasteringLimiterAudioProcessor::WishcraftMasteringLimiterAudioProcessor
              && ceilingParam != nullptr && releaseParam != nullptr && inputGainParam != nullptr
              && outputCeilingParam != nullptr && linkParam != nullptr && limiterAutoGainParam != nullptr
              && scLowShelfParam != nullptr && scHighShelfParam != nullptr && bypassParam != nullptr
+             && listenModeParam != nullptr
              && grMeterLParam != nullptr && grMeterRParam != nullptr && peakMeterLParam != nullptr
              && peakMeterRParam != nullptr && charMeterLParam != nullptr && charMeterRParam != nullptr
              && dynamicRangeParam != nullptr && lufsParam != nullptr && overYellowParam != nullptr
@@ -407,12 +409,14 @@ void WishcraftMasteringLimiterAudioProcessor::processBlock (juce::AudioBuffer<fl
         // Limiter just updated above -- pulled from there rather than re-smoothed here.
         safetyClip.setOutputCeilingSmoothed (limiter.getOutputCeilingSmoothed());
         const bool bypassOn = bypassParam->get();
+        const bool listenModeOn = listenModeParam->getIndex() > 0;
 
         oversamplerL.upsample ((double) left[n],  upL);
         oversamplerR.upsample ((double) right[n], upR);
 
         double outL = 0.0, outR = 0.0;
         double outDryRawL = 0.0, outDryRawR = 0.0;
+        double outDryGainedL = 0.0, outDryGainedR = 0.0;
         // Last oversampled tick's dry/clipped-pre-makeup pair, for the Character
         // Activity meter -- matches the JSFX reading dry_L/char_L once per host sample
         // as whatever they were left at by the final tick of the block.
@@ -420,20 +424,37 @@ void WishcraftMasteringLimiterAudioProcessor::processBlock (juce::AudioBuffer<fl
 
         for (int j = 0; j < factor; ++j)
         {
-            // Stage 7: Selective Clipper -> Input Gain -> Limiter -> two-stage Safety
-            // Clip. The Bypass raw-dry path is computed every tick regardless of Bypass
-            // state (matching the JSFX's "full wet path always runs" design, just
-            // without its CPU-optimization of skipping the unused downsample FIR).
+            // Selective Clipper -> Input Gain -> Limiter -> two-stage Safety Clip. The
+            // Bypass raw-dry and Delta gained-dry/Character-only paths are all computed
+            // every tick regardless of mode (matching the JSFX's "full wet path always
+            // runs" design, just without its CPU-optimization of skipping unused
+            // downsample FIRs).
             double clipL, clipR, dryL, dryR, charL, charR;
             selectiveClipper.processTick (upL[j], upR[j], clipL, clipR, dryL, dryR, charL, charR);
             lastDryL = dryL; lastDryR = dryR; lastCharL = charL; lastCharR = charR;
 
             double stageL, stageR, dryRawL, dryRawR;
-            limiter.processTick (clipL, clipR, dryL, dryR, stageL, stageR, dryRawL, dryRawR);
+            double charOnlyDelayedL, charOnlyDelayedR, dryGainedDelayedL, dryGainedDelayedR;
+            limiter.processTick (clipL, clipR, dryL, dryR, stageL, stageR, dryRawL, dryRawR,
+                                  charOnlyDelayedL, charOnlyDelayedR, dryGainedDelayedL, dryGainedDelayedR);
 
-            // Peak meter reads the Limiter's output BEFORE the oversampled-domain
-            // safety clip -- matches the JSFX exactly (tells you how hard the safety
-            // net had to work, not just that it worked).
+            // Delta Listen Mode: substitute the Limiter's output with the delay-matched,
+            // gained Selective Clipper output BEFORE metering/safety-clip/downsample --
+            // matches the JSFX's `listen_mode > 0.5 ? stage_L = charonly_la_L`. This
+            // makes Delta compare dry against what the SELECTIVE CLIPPER did, not
+            // against the Limiter's gain reduction (confirmed by reading @sample's
+            // final spl0/spl1 selection, not just the "Delta" naming/spec wording).
+            if (listenModeOn)
+            {
+                stageL = charOnlyDelayedL;
+                stageR = charOnlyDelayedR;
+            }
+
+            // Peak meter reads this (possibly Delta-substituted) value BEFORE the
+            // oversampled-domain safety clip -- matches the JSFX exactly (tells you how
+            // hard the safety net had to work, not just that it worked; and when Delta
+            // is on, reflects what's actually audible, matching the JSFX's tp_level_L_db
+            // being read after the same substitution).
             metering.updatePeakTick (stageL, stageR);
 
             // Oversampled-domain safety clip -- applied only to the processed signal,
@@ -443,8 +464,16 @@ void WishcraftMasteringLimiterAudioProcessor::processBlock (juce::AudioBuffer<fl
 
             const double downL = oversamplerL.downsample (j, stageL);
             const double downR = oversamplerR.downsample (j, stageR);
-            const double downRawL = oversamplerL.downsampleSecondary (j, dryRawL);
-            const double downRawR = oversamplerR.downsampleSecondary (j, dryRawR);
+            // The expensive convolution for these two only actually runs when their
+            // output is needed this block (matches the JSFX's own CPU-optimization
+            // comment: "raw-dry FIR only when Bypass active, gained-dry FIR only when
+            // Delta active") -- the buffer WRITE still happens unconditionally above
+            // this branch either way, so there's no seamlessness cost when a mode
+            // switches on mid-stream.
+            const double downRawL = oversamplerL.downsampleSecondary (j, dryRawL, bypassOn);
+            const double downRawR = oversamplerR.downsampleSecondary (j, dryRawR, bypassOn);
+            const double downGainedDryL = oversamplerL.downsampleTertiary (j, dryGainedDelayedL, listenModeOn);
+            const double downGainedDryR = oversamplerR.downsampleTertiary (j, dryGainedDelayedR, listenModeOn);
 
             if (j == 0)
             {
@@ -452,23 +481,38 @@ void WishcraftMasteringLimiterAudioProcessor::processBlock (juce::AudioBuffer<fl
                 outR = downR;
                 outDryRawL = downRawL;
                 outDryRawR = downRawR;
+                outDryGainedL = downGainedDryL;
+                outDryGainedR = downGainedDryR;
             }
         }
 
         // Post-downsample backstop clip -- both paths, so whichever one gets selected
-        // below is already correctly clipped.
+        // below is already correctly clipped. outDryGainedL/R is deliberately NOT
+        // clipped here -- matches the JSFX, which uses out_dry_L/R raw in the delta
+        // subtraction and only safety-clips the boosted RESULT afterward.
         outL = safetyClip.clip (outL);
         outR = safetyClip.clip (outR);
         outDryRawL = safetyClip.clip (outDryRawL);
         outDryRawR = safetyClip.clip (outDryRawR);
 
-        // Bypass > Delta > Normal. Delta (listen_mode) isn't ported yet, so this
-        // reduces to Bypass > Normal for now.
+        // Bypass > Delta > Normal.
         double finalOutL, finalOutR;
         if (bypassOn)
         {
             finalOutL = outDryRawL;
             finalOutR = outDryRawR;
+        }
+        else if (listenModeOn)
+        {
+            // "What was removed" by the Selective Clipper: gained dry minus the
+            // (Delta-substituted, already safety-clipped) Character-only output,
+            // boosted by DELTA_GAIN_DB since the raw difference is typically very
+            // quiet -- matches the JSFX's spl0 = (out_dry_L - out_L) * delta_gain_lin.
+            static const double deltaGainLin = std::pow (10.0, SelectiveClipper::deltaGainDb / 20.0);
+            finalOutL = (outDryGainedL - outL) * deltaGainLin;
+            finalOutR = (outDryGainedR - outR) * deltaGainLin;
+            finalOutL = safetyClip.clip (finalOutL);
+            finalOutR = safetyClip.clip (finalOutR);
         }
         else
         {
