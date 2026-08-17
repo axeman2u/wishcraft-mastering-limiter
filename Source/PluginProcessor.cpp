@@ -57,11 +57,14 @@ juce::AudioProcessorValueTreeState::ParameterLayout WishcraftMasteringLimiterAud
 {
     juce::AudioProcessorValueTreeState::ParameterLayout layout;
 
-    // JSFX slider1:os_choice=1<0,1,1{2x,4x}>-Oversampling Factor
+    // JSFX slider1:os_choice=1<0,1,1{2x,4x}>-Oversampling Factor -- extended to a third
+    // 8x option (not in the original JSFX) since confirmed CPU headroom (<2% at 4x)
+    // leaves ample room, and finer oversampled resolution benefits the True Peak
+    // Limiter's peak estimate. Default index (1 = 4x) unchanged.
     layout.add (std::make_unique<juce::AudioParameterChoice> (
         juce::ParameterID { "os_choice", 1 },
         "Oversampling Factor",
-        juce::StringArray { "2x", "4x" },
+        juce::StringArray { "2x", "4x", "8x" },
         1));
 
     // JSFX slider2:threshold_db=-3<-24,0,0.01>-Selective Clip Threshold (dB)
@@ -90,10 +93,13 @@ juce::AudioProcessorValueTreeState::ParameterLayout WishcraftMasteringLimiterAud
         juce::StringArray { "Normal", "Delta (what was removed)" },
         0));
 
-    // JSFX slider5:ceiling_db=-1<-18,0,0.01>-Limiter Ceiling (dB)
+    // JSFX slider5:ceiling_db=-1<-18,0,0.01>-Limiter Ceiling (dB) -- displayed as
+    // "Threshold" (param ID kept as ceiling_db for automation/state compatibility): a
+    // smoothed target the signal can transiently overshoot, not a hard ceiling -- see
+    // PluginProcessor.h's ceilingParam comment.
     layout.add (std::make_unique<juce::AudioParameterFloat> (
         juce::ParameterID { "ceiling_db", 1 },
-        "Limiter Ceiling",
+        "Threshold",
         juce::NormalisableRange<float> (-18.0f, 0.0f, 0.01f),
         -1.0f));
 
@@ -122,13 +128,12 @@ juce::AudioProcessorValueTreeState::ParameterLayout WishcraftMasteringLimiterAud
         juce::NormalisableRange<float> (0.0f, 24.0f, 0.1f),
         0.0f));
 
-    // JSFX slider9:output_ceiling_db=-1<-3,0,0.01>-True Peak Output Ceiling (safety clip)
-    // -- displayed as "Peak Ceiling": the Safety Clip guarantees the discrete sample
-    // peak, not a certified true/inter-sample-peak bound (see Limiter.h's ISP_MARGIN_DB
-    // comment), so the display name doesn't claim more than what's actually delivered.
+    // JSFX slider9:output_ceiling_db=-1<-3,0,0.01>-True Peak Output Ceiling -- displayed
+    // as "TP Limit": drives TruePeakLimiter's target ceiling (smooth gain reduction,
+    // genuinely true-peak-aware -- see TruePeakLimiter.h), adjustable up to 0.0 dB.
     layout.add (std::make_unique<juce::AudioParameterFloat> (
         juce::ParameterID { "output_ceiling_db", 1 },
-        "Peak Ceiling",
+        "TP Limit",
         juce::NormalisableRange<float> (-3.0f, 0.0f, 0.01f),
         -1.0f));
 
@@ -326,9 +331,8 @@ void WishcraftMasteringLimiterAudioProcessor::prepareToPlay (double sampleRate, 
                                        (double) inputGainParam->get(),
                                        (double) scLowShelfParam->get(),
                                        (double) scHighShelfParam->get());
-    // JSFX @init: safety_ceiling_lin is first computed in @sample from the already-
-    // correct (non-ramped) output_ceiling_smoothed set just above -- matching that here.
-    safetyClip.setOutputCeilingSmoothed ((double) outputCeilingParam->get());
+
+    truePeakLimiter.prepare (sampleRate);
 
     metering.prepare (sampleRate);
 
@@ -355,21 +359,24 @@ bool WishcraftMasteringLimiterAudioProcessor::isBusesLayoutSupported (const Buse
 void WishcraftMasteringLimiterAudioProcessor::reconfigureEngine (int osChoiceIndex)
 {
     currentOsChoiceIndex = osChoiceIndex;
-    const int factor = (osChoiceIndex == 0) ? 2 : 4;
+    const int factor = (osChoiceIndex == 0) ? 2 : (osChoiceIndex == 1) ? 4 : 8;
     const double osRate = currentSampleRate * factor;
 
     oversamplerL.setFactor (factor);
     oversamplerR.setFactor (factor);
     selectiveClipper.setFactor (factor, osRate);
     limiter.setFactor (factor, osRate);
+    truePeakLimiter.setFactor (factor, osRate);
     metering.setFactor (osRate);
 
     // JSFX @block: pdc_delay = DELAY_SAMPLES_BASE + CHAR_BUDGET_BASE + LA_BUDGET_BASE.
-    // All three contributions are now ported. Factor-independent by construction, same
-    // as the JSFX -- switching 2x/4x never changes the reported latency.
+    // Now also includes the True Peak Limiter's own lookahead budget (a genuine addition
+    // over the JSFX, not a straight port). Factor-independent by construction, same as
+    // the JSFX -- switching 2x/4x/8x never changes the reported latency.
     setLatencySamples (PolyphaseOversampler::delaySamplesBase
                         + selectiveClipper.getCharBudgetBase()
-                        + limiter.getLaBudgetBase());
+                        + limiter.getLaBudgetBase()
+                        + truePeakLimiter.getLaBudgetBase());
 }
 
 void WishcraftMasteringLimiterAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
@@ -405,9 +412,9 @@ void WishcraftMasteringLimiterAudioProcessor::processBlock (juce::AudioBuffer<fl
                                 (double) outputCeilingParam->get(),
                                 limiterAutoGainParam->get(),
                                 scLowShelfDb, scHighShelfDb);
-        // safety_ceiling_lin is derived from the same output_ceiling_smoothed the
+        // TruePeakLimiter's target is derived from the same output_ceiling_smoothed the
         // Limiter just updated above -- pulled from there rather than re-smoothed here.
-        safetyClip.setOutputCeilingSmoothed (limiter.getOutputCeilingSmoothed());
+        truePeakLimiter.setTargetCeiling (limiter.getOutputCeilingSmoothed());
         const bool bypassOn = bypassParam->get();
         const bool listenModeOn = listenModeParam->getIndex() > 0;
 
@@ -438,23 +445,41 @@ void WishcraftMasteringLimiterAudioProcessor::processBlock (juce::AudioBuffer<fl
             limiter.processTick (clipL, clipR, dryL, dryR, stageL, stageR, dryRawL, dryRawR,
                                   charOnlyDelayedL, charOnlyDelayedR, dryGainedDelayedL, dryGainedDelayedR);
 
+            // True Peak Limiter: smooth gain reduction targeting TP Limit, protecting
+            // the Limiter's actual output -- BEFORE any Delta substitution below. This
+            // must run before the substitution, not after: Delta's "what was removed"
+            // math is gainedDry - charOnly, and charOnly needs to stay an untouched
+            // reference for that subtraction to mean anything, the same principle as
+            // Bypass's raw-dry reference staying untouched by any processing. Running
+            // this after the substitution (an earlier mistake) fed a continuously
+            // gain-modulated version of charOnly into the subtraction instead -- since
+            // TP Limit engages far more often than the old rare hard-clip-only safety
+            // net did, that modulation was audible as the full program bleeding into
+            // Delta's output.
+            truePeakLimiter.processTick (stageL, stageR, stageL, stageR);
+
             // Delta Listen Mode: substitute the Limiter's output with the delay-matched,
             // gained Selective Clipper output BEFORE metering/safety-clip/downsample --
             // matches the JSFX's `listen_mode > 0.5 ? stage_L = charonly_la_L`. This
             // makes Delta compare dry against what the SELECTIVE CLIPPER did, not
             // against the Limiter's gain reduction (confirmed by reading @sample's
             // final spl0/spl1 selection, not just the "Delta" naming/spec wording).
+            // charOnlyDelayedL/R here is the same untouched reference TruePeakLimiter
+            // never saw above.
             if (listenModeOn)
             {
                 stageL = charOnlyDelayedL;
                 stageR = charOnlyDelayedR;
             }
 
-            // Peak meter reads this (possibly Delta-substituted) value BEFORE the
-            // oversampled-domain safety clip -- matches the JSFX exactly (tells you how
-            // hard the safety net had to work, not just that it worked; and when Delta
-            // is on, reflects what's actually audible, matching the JSFX's tp_level_L_db
-            // being read after the same substitution).
+            // Peak meter reads this value BEFORE the oversampled-domain safety clip --
+            // matches the original reasoning (tells you how hard the final backstop had
+            // to work, not just that it worked). On the Normal path this reflects the
+            // actual TruePeakLimiter-protected true peak; in Delta mode it reflects the
+            // untouched charOnly reference (Delta was never meant to carry the same TP
+            // guarantee as the primary output -- it's a monitoring mode, not a render
+            // path, and its own output still gets safety-clipped after the subtraction
+            // below).
             metering.updatePeakTick (stageL, stageR);
 
             // Oversampled-domain safety clip -- applied only to the processed signal,

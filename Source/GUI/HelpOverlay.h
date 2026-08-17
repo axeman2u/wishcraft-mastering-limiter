@@ -57,9 +57,15 @@ private:
         addHeader ("WORKFLOW");
         addBody ("1. Selective Clipper -- set Threshold and Selectivity first.\n"
                  "2. Gain -- use Input Gain to drive the already-clipped signal into the Limiter.\n"
-                 "3. Limiter -- dial in Ceiling, Release, Link, and Auto Gain last.\n\n"
+                 "3. Limiter -- dial in Threshold, Release, Link, and Auto Gain last.\n\n"
                  "This is the opposite order from most limiter plugins, where you'd normally start with "
                  "the limiter itself.");
+
+        addHeader ("ADJUSTING VALUES");
+        addBody ("Click-drag any knob or slider to change it -- knobs respond to vertical movement, "
+                 "sliders track the mouse directly. Hold Shift while dragging for finer resolution. "
+                 "Ctrl/Cmd+click any control to type an exact value. Double-click a control to reset it "
+                 "to its default.");
 
         addHeader ("WHY IT'S DIFFERENT");
         addBody ("The Selective Clipper only touches genuinely brief peaks -- anything under about 5ms. "
@@ -86,11 +92,15 @@ private:
                 "clipper without it sounding like distortion.");
         addTip ("Bypass --", "full latency-compensated bypass -- compares the true, unprocessed input "
                 "against your processed output.");
+        addTip ("Shaping EQ --", "shapes what triggers the Selective Clipper and the Limiter, not just "
+                "what they detect -- unlike a compressor's sidechain EQ, the Limiter's copy of this filter "
+                "audibly colors your output too, so treat it as a tone control, not something silent "
+                "happening behind the scenes.");
 
         addHeader ("METERS");
         addBody ("SELECTIVE CLIP shows how much the clipper is removing, per channel. GAIN REDUCTION shows "
                  "how hard the Limiter is working. OUTPUT shows final peak level plus Dynamic Range and "
-                 "short-term LUFS -- the dot beside each channel turns yellow past your Peak Ceiling, red "
+                 "short-term LUFS -- the dot beside each channel turns yellow past your TP Limit, red "
                  "past true 0 dBFS.");
     }
 

@@ -10,11 +10,11 @@
 #include "GUI/WishcraftColours.h"
 #include "GUI/WishcraftHSlider.h"
 #include "GUI/WishcraftKnob.h"
-#include "GUI/WishcraftRadioPair.h"
+#include "GUI/WishcraftRadioGroup.h"
 #include "PluginProcessor.h"
 
 // Rebuilds the JSFX's @gfx custom layout in real JUCE components: the same broad
-// three-macro-column arrangement (GAIN/SELECTIVE CLIPPER/SIDECHAIN EQ stacked on the
+// three-macro-column arrangement (GAIN/SELECTIVE CLIPPER/SHAPING EQ stacked on the
 // left, LIMITER/UTILITY stacked in the middle, three meter columns on the right), the
 // same group/column labels, and the same four mouse-interaction behaviors
 // (click-drag, Shift+drag fine adjustment, Ctrl/Cmd+click text entry, double-click
@@ -65,11 +65,18 @@ private:
     // Group panel backgrounds (painted first / sent to back).
     GroupPanel gainGroup { "GAIN" };
     GroupPanel clipperGroup { "SELECTIVE CLIPPER" };
-    GroupPanel sidechainGroup { "SIDECHAIN EQ" };
+    GroupPanel sidechainGroup { "SHAPING EQ" };
     GroupPanel limiterGroup { "LIMITER" };
     GroupPanel utilityGroup { "UTILITY" };
 
-    // Column 1: GAIN / SELECTIVE CLIPPER / SIDECHAIN EQ.
+    // Column 1: GAIN / SELECTIVE CLIPPER / SHAPING EQ. Renamed from "SIDECHAIN EQ"
+    // (the sidechainGroup/sc* identifiers below still say "sidechain" -- that's still
+    // the accurate DSP term) because "sidechain" specifically implies
+    // detector-only/inaudible, compressor-style, and that's only true for the
+    // Selective Clipper's copy of this filter -- the Limiter's copy is NOT
+    // detector-only (see Limiter.h), so the JSFX-matching behavior really does color
+    // the audible output when these sliders move. "Sidechain EQ" over-promised
+    // silence that half of what it controls doesn't actually deliver.
     std::unique_ptr<WishcraftKnob> inputGainKnob;
     std::unique_ptr<WishcraftHSlider> thresholdSlider;
     std::unique_ptr<WishcraftHSlider> selectivitySlider;
@@ -84,7 +91,7 @@ private:
     std::unique_ptr<WishcraftKnob> linkKnob;
     std::unique_ptr<WishcraftKnob> outputCeilingKnob;
     std::unique_ptr<WishcraftButton> autoGainButton;
-    std::unique_ptr<WishcraftRadioPair> osChoiceRadio;
+    std::unique_ptr<WishcraftRadioGroup> osChoiceRadio;
     std::unique_ptr<WishcraftButton> bypassButton;
 
     // Columns 3-5: meters.

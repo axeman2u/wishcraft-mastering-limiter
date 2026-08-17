@@ -26,8 +26,10 @@
 // color the Limiter's output, not just its detection -- ported to match the JSFX exactly,
 // not "fixed" to a stricter detector-only interpretation.
 //
-// ISP_MARGIN_DB is a fixed constant used only for the Auto Gain cap formula this stage --
-// the true-peak safety clip itself (ISP_MARGIN_DB's main use) isn't ported yet.
+// Limiter Auto Gain is strictly cut-only: unlike a compressor's makeup gain, it must
+// never restore level above unity, so its cap is a fixed 0.0 dB rather than a formula
+// derived from any peak-ceiling value (that used to route through ISP_MARGIN_DB before
+// TruePeakLimiter/SafetyClip took over true-peak safety -- see TruePeakLimiter.h).
 //
 // KNOWN ISSUE (Stage 4, unresolved, deprioritized by request): direct REAPER-rendered
 // comparison against the real JSFX shows this Limiter applies ~0.11-0.16 dB MORE gain
@@ -50,7 +52,6 @@ public:
     static constexpr double makeupAttackMs  = 5.0;   // JSFX MAKEUP_PEAK_ATTACK_MS
     static constexpr double makeupReleaseMs = 300.0; // JSFX MAKEUP_PEAK_RELEASE_MS
     static constexpr double paramSmoothMs   = 15.0;  // JSFX PARAM_SMOOTH_MS
-    static constexpr double ispMarginDb     = 0.5;   // JSFX ISP_MARGIN_DB
 
     static constexpr double attackMs         = 1.0;   // JSFX ATTACK_MS
     static constexpr double historyAttackMs  = 15.0;  // JSFX HISTORY_ATTACK_MS
@@ -122,11 +123,11 @@ public:
 
     int getLaBudgetBase() const noexcept { return laBudgetBase; }
 
-    // The single, shared output_ceiling_smoothed value -- also needed by the Safety Clip
-    // stage (safety_ceiling_lin = 10^((output_ceiling_smoothed - ISP_MARGIN_DB)/20)) and
-    // by Bypass's post-downsample backstop, both outside this class. Exposed rather than
-    // having those re-derive/re-smooth their own copy, matching the JSFX's single global
-    // output_ceiling_smoothed used everywhere it's needed.
+    // The single, shared output_ceiling_smoothed value -- now the True Peak Limiter's
+    // target (see TruePeakLimiter::setTargetCeiling), pulled from here rather than
+    // re-derived/re-smoothed independently, matching the JSFX's single global
+    // output_ceiling_smoothed used everywhere it's needed. Safety Clip no longer reads
+    // this -- it's a fixed backstop, decoupled from any user parameter (see SafetyClip.h).
     double getOutputCeilingSmoothed() const noexcept { return outputCeilingSmoothed; }
 
     // JSFX @sample (top-of-block section): ceiling/output-ceiling/input-gain ramp one-pole
@@ -148,9 +149,6 @@ public:
 
         linkFrac = linkPct / 100.0;
         autoGainOn = autoGainOnIn;
-
-        // Cap Auto Gain so it cannot restore past the ISP-margin ceiling either.
-        autoGainMaxBoostDb = std::max (0.0, (outputCeilingSmoothed - ispMarginDb) - ceilingSmoothed);
 
         scLowShelfSmoothed += (scLowShelfDb - scLowShelfSmoothed) * paramSmoothCoeff;
         scHighShelfSmoothed += (scHighShelfDb - scHighShelfSmoothed) * paramSmoothCoeff;
@@ -231,8 +229,9 @@ public:
 
         if (autoGainOn)
         {
-            outL = applyPeakRatioMakeup (left.fullGainPeakDry,  left.fullGainPeakChar,  dryL, limL, makeupAttackCoeff, makeupReleaseCoeff, -60.0, autoGainMaxBoostDb);
-            outR = applyPeakRatioMakeup (right.fullGainPeakDry, right.fullGainPeakChar, dryR, limR, makeupAttackCoeff, makeupReleaseCoeff, -60.0, autoGainMaxBoostDb);
+            // Fixed 0.0 dB cap -- strictly cut-only, unlike a compressor's makeup gain.
+            outL = applyPeakRatioMakeup (left.fullGainPeakDry,  left.fullGainPeakChar,  dryL, limL, makeupAttackCoeff, makeupReleaseCoeff, -60.0, 0.0);
+            outR = applyPeakRatioMakeup (right.fullGainPeakDry, right.fullGainPeakChar, dryR, limR, makeupAttackCoeff, makeupReleaseCoeff, -60.0, 0.0);
         }
         else
         {
@@ -341,7 +340,6 @@ private:
     double inputGainLin = 1.0;
     double releaseFastMs = 20.0, releaseSlowMs = 300.0;
     double linkFrac = 0.75;
-    double autoGainMaxBoostDb = 0.0;
     bool autoGainOn = false;
     double paramSmoothCoeff = 0.0;
 

@@ -7,6 +7,7 @@
 #include "DSP/PolyphaseOversampler.h"
 #include "DSP/SafetyClip.h"
 #include "DSP/SelectiveClipper.h"
+#include "DSP/TruePeakLimiter.h"
 
 //==============================================================================
 class WishcraftMasteringLimiterAudioProcessor final : public juce::AudioProcessor
@@ -80,17 +81,20 @@ private:
     // slider variable is "character"; the GUI section itself is called "Selective
     // Clipper", but the control it holds is the selectivity/aggressiveness setting).
     juce::AudioParameterFloat* selectivityParam = nullptr;
-    // JSFX slider5: ceiling_db -- Limiter Ceiling.
+    // JSFX slider5: ceiling_db -- displayed as "Threshold" (param ID stays ceiling_db for
+    // host automation/state compatibility): it's a smoothed, program-dependent-release
+    // target the signal can transiently overshoot, not a hard-enforced ceiling -- true
+    // peak safety is TruePeakLimiter/SafetyClip's job now, not this control's.
     juce::AudioParameterFloat* ceilingParam = nullptr;
     // JSFX slider7: release_pct -- Release.
     juce::AudioParameterFloat* releaseParam = nullptr;
     // JSFX slider8: input_gain_db -- Input Gain (Drive), after Selective Clipper, before Limiter.
     juce::AudioParameterFloat* inputGainParam = nullptr;
-    // JSFX slider9: output_ceiling_db -- displayed as "Peak Ceiling" (not "True Peak"):
-    // the Safety Clip only guarantees the discrete sample peak exactly, not a certified
-    // inter-sample/true-peak bound, so the name shouldn't claim a stronger guarantee than
-    // what's delivered. Caps Limiter Auto Gain and sets the two-stage Safety Clip's
-    // ceiling (ceiling - ISP_MARGIN_DB).
+    // JSFX slider9: output_ceiling_db -- displayed as "TP Limit". Drives the True Peak
+    // Limiter's target ceiling (Source/DSP/TruePeakLimiter.h), which does the real
+    // true-peak-safety work via smooth gain reduction. No longer caps Limiter Auto Gain
+    // (fixed at 0.0 dB now, strictly cut-only) or feeds Safety Clip (a fixed 0.0 dBFS
+    // backstop now, fully decoupled from this parameter).
     juce::AudioParameterFloat* outputCeilingParam = nullptr;
     // JSFX slider10: link_pct -- Stereo Link.
     juce::AudioParameterFloat* linkParam = nullptr;
@@ -140,7 +144,8 @@ private:
     PolyphaseOversampler oversamplerL, oversamplerR;
     SelectiveClipper selectiveClipper;
     Limiter limiter;
-    SafetyClip safetyClip; // one shared instance -- safety_ceiling_lin is a single scalar in the JSFX, not per-channel
+    TruePeakLimiter truePeakLimiter; // smooth-gain-reduction true-peak stage, before Safety Clip
+    SafetyClip safetyClip; // one shared instance, fixed 0.0 dBFS backstop -- see SafetyClip.h
     Metering metering;
 
     int currentOsChoiceIndex = -1; // forces a reconfigure on the first block

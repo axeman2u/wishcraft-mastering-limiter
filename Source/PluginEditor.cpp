@@ -32,7 +32,7 @@ WishcraftMasteringLimiterAudioProcessorEditor::WishcraftMasteringLimiterAudioPro
     contentComponent.addAndMakeVisible (limiterGroup);
     contentComponent.addAndMakeVisible (utilityGroup);
 
-    // ---- Column 1: GAIN / SELECTIVE CLIPPER / SIDECHAIN EQ ----
+    // ---- Column 1: GAIN / SELECTIVE CLIPPER / SHAPING EQ ----
     inputGainKnob = std::make_unique<WishcraftKnob> (
         rangedParam ("input_gain_db"), "Input Gain",
         [] (float v) { return juce::String (v, 1) + " dB"; });
@@ -64,7 +64,7 @@ WishcraftMasteringLimiterAudioProcessorEditor::WishcraftMasteringLimiterAudioPro
 
     // ---- Column 2: LIMITER / UTILITY ----
     ceilingKnob = std::make_unique<WishcraftKnob> (
-        rangedParam ("ceiling_db"), "Ceiling",
+        rangedParam ("ceiling_db"), "Threshold",
         [] (float v) { return juce::String (v, 1) + " dB"; });
     contentComponent.addAndMakeVisible (*ceilingKnob);
 
@@ -84,7 +84,7 @@ WishcraftMasteringLimiterAudioProcessorEditor::WishcraftMasteringLimiterAudioPro
     contentComponent.addAndMakeVisible (*linkKnob);
 
     outputCeilingKnob = std::make_unique<WishcraftKnob> (
-        rangedParam ("output_ceiling_db"), "Out Ceiling",
+        rangedParam ("output_ceiling_db"), "TP Limit",
         [] (float v) { return juce::String (v, 2) + " dB"; });
     contentComponent.addAndMakeVisible (*outputCeilingKnob);
 
@@ -92,8 +92,8 @@ WishcraftMasteringLimiterAudioProcessorEditor::WishcraftMasteringLimiterAudioPro
         rangedParam ("limiter_auto_gain"), "Auto Gain", WishcraftColours::buttonYellow);
     contentComponent.addAndMakeVisible (*autoGainButton);
 
-    osChoiceRadio = std::make_unique<WishcraftRadioPair> (
-        rangedParam ("os_choice"), "2x", "4x", WishcraftColours::buttonBlue);
+    osChoiceRadio = std::make_unique<WishcraftRadioGroup> (
+        rangedParam ("os_choice"), juce::StringArray { "2x", "4x", "8x" }, WishcraftColours::buttonBlue);
     contentComponent.addAndMakeVisible (*osChoiceRadio);
 
     bypassButton = std::make_unique<WishcraftButton> (
@@ -234,7 +234,7 @@ void WishcraftMasteringLimiterAudioProcessorEditor::layoutContent()
     {
         auto interior = utilityGroup.getBounds().withTrimmedTop (headerH).reduced (4, 2);
         auto row1 = interior.removeFromTop (22);
-        osChoiceRadio->setBounds (juce::Rectangle<int> (146, 22).withCentre (row1.getCentre()));
+        osChoiceRadio->setBounds (juce::Rectangle<int> (210, 22).withCentre (row1.getCentre()));
         interior.removeFromTop (8);
         auto row2 = interior.removeFromTop (22);
         bypassButton->setBounds (juce::Rectangle<int> (90, 22).withCentre (row2.getCentre()));

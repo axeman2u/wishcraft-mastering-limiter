@@ -168,8 +168,9 @@ public:
         const double lraRangeDb = std::max (0.0, lraCombinedMax - lraCombinedMin);
 
         // Two-tier Over indicator, checked against the HELD peak value, not live --
-        // yellow past the Peak Ceiling (accepted mastering-level clipping), red past
-        // true 0 dBFS (hard digital clipping).
+        // yellow past TP Limit (outputCeilingSmoothed -- the same target the True Peak
+        // Limiter aims for; should now trigger only rarely, when its own internal
+        // margin gets used up), red past true 0 dBFS (hard digital clipping).
         const bool yellowL = (peakHoldLValue > outputCeilingSmoothed) && (peakHoldLValue <= 0.0);
         const bool yellowR = (peakHoldRValue > outputCeilingSmoothed) && (peakHoldRValue <= 0.0);
         const bool redL = peakHoldLValue > 0.0;

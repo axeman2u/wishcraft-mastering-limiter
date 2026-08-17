@@ -12,12 +12,12 @@
 //
 // DELAY_SAMPLES_BASE is a fixed base-rate-equivalent group delay for the combined
 // upsample+downsample FIR round trip -- by construction, independent of which
-// factor (2x/4x) is active, matching the JSFX's "budgets by construction" pattern.
+// factor (2x/4x/8x) is active, matching the JSFX's "budgets by construction" pattern.
 class PolyphaseOversampler
 {
 public:
     static constexpr int delaySamplesBase = 121;
-    static constexpr int maxFactor        = 4;
+    static constexpr int maxFactor        = 8;
     static constexpr int maxNumTaps       = delaySamplesBase * maxFactor + 1;
     static constexpr int rawHistLen       = delaySamplesBase + 1;
 
@@ -30,10 +30,10 @@ public:
         setFactor (2);
     }
 
-    // factor must be 2 or 4 (JSFX os_choice: 0 -> 2x, 1 -> 4x).
+    // factor must be 2, 4, or 8 (os_choice: 0 -> 2x, 1 -> 4x, 2 -> 8x).
     void setFactor (int newFactor)
     {
-        factor = (newFactor <= 2) ? 2 : 4;
+        factor = (newFactor <= 2) ? 2 : (newFactor <= 4) ? 4 : 8;
         numTaps = delaySamplesBase * factor + 1;
         computeCoeffs();
         reset();
