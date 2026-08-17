@@ -4,6 +4,7 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 
 #include "GUI/GroupPanel.h"
+#include "GUI/HelpOverlay.h"
 #include "GUI/MeterColumns.h"
 #include "GUI/WishcraftButton.h"
 #include "GUI/WishcraftColours.h"
@@ -58,6 +59,8 @@ private:
     // belongs to this instead.
     juce::Component contentComponent;
     juce::Label titleLabel;
+    juce::TextButton helpButton;
+    HelpOverlay helpOverlay;
 
     // Group panel backgrounds (painted first / sent to back).
     GroupPanel gainGroup { "GAIN" };

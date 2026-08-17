@@ -12,6 +12,20 @@ WishcraftMasteringLimiterAudioProcessorEditor::WishcraftMasteringLimiterAudioPro
     titleLabel.setJustificationType (juce::Justification::centred);
     contentComponent.addAndMakeVisible (titleLabel);
 
+    helpButton.setButtonText ("?");
+    helpButton.setColour (juce::TextButton::buttonColourId, WishcraftColours::buttonOff);
+    helpButton.setColour (juce::TextButton::textColourOffId, WishcraftColours::controlValueText);
+    helpButton.onClick = [this] { helpOverlay.setVisible (true); helpOverlay.toFront (true); };
+    contentComponent.addAndMakeVisible (helpButton);
+
+    // Covers the whole design canvas, starts hidden; brought to front and shown only
+    // when helpButton is clicked (see above) or Options-menu equivalent later.
+    // addChildComponent() (not addAndMakeVisible()) so it actually starts hidden --
+    // addAndMakeVisible() unconditionally forces visible=true on add, which would
+    // undo a setVisible(false) called beforehand.
+    helpOverlay.setBounds (0, 0, designW, designH);
+    contentComponent.addChildComponent (helpOverlay);
+
     contentComponent.addAndMakeVisible (gainGroup);
     contentComponent.addAndMakeVisible (clipperGroup);
     contentComponent.addAndMakeVisible (sidechainGroup);
@@ -154,6 +168,8 @@ void WishcraftMasteringLimiterAudioProcessorEditor::layoutContent()
     constexpr int hsliderH = 70;
 
     titleLabel.setBounds (0, 0, designW, 36);
+    helpButton.setBounds (designW - 34, 6, 24, 24);
+    helpOverlay.setBounds (0, 0, designW, designH);
 
     // ---- Column 1 ----
     // SELECTIVE CLIPPER now sits above GAIN, matching both the actual signal path
