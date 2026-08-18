@@ -16,6 +16,7 @@ WishcraftMasteringLimiterAudioProcessor::WishcraftMasteringLimiterAudioProcessor
     selectivityParam     = dynamic_cast<juce::AudioParameterFloat*>  (apvts.getParameter ("selectivity"));
     ceilingParam         = dynamic_cast<juce::AudioParameterFloat*>  (apvts.getParameter ("ceiling_db"));
     releaseParam         = dynamic_cast<juce::AudioParameterFloat*>  (apvts.getParameter ("release_pct"));
+    lookaheadParam       = dynamic_cast<juce::AudioParameterFloat*>  (apvts.getParameter ("lookahead_ms"));
     inputGainParam       = dynamic_cast<juce::AudioParameterFloat*>  (apvts.getParameter ("input_gain_db"));
     outputCeilingParam   = dynamic_cast<juce::AudioParameterFloat*>  (apvts.getParameter ("output_ceiling_db"));
     linkParam            = dynamic_cast<juce::AudioParameterFloat*>  (apvts.getParameter ("link_pct"));
@@ -37,7 +38,8 @@ WishcraftMasteringLimiterAudioProcessor::WishcraftMasteringLimiterAudioProcessor
     overRedParam        = dynamic_cast<juce::AudioParameterBool*>  (apvts.getParameter ("over_red"));
 
     jassert (osChoiceParam != nullptr && thresholdParam != nullptr && selectivityParam != nullptr
-             && ceilingParam != nullptr && releaseParam != nullptr && inputGainParam != nullptr
+             && ceilingParam != nullptr && releaseParam != nullptr && lookaheadParam != nullptr
+             && inputGainParam != nullptr
              && outputCeilingParam != nullptr && linkParam != nullptr && limiterAutoGainParam != nullptr
              && scLowShelfParam != nullptr && scHighShelfParam != nullptr && bypassParam != nullptr
              && listenModeParam != nullptr
@@ -84,9 +86,8 @@ juce::AudioProcessorValueTreeState::ParameterLayout WishcraftMasteringLimiterAud
         50.0f));
 
     // JSFX slider4:listen_mode=0<0,1,1{Normal,Delta (what was removed)}>-Listen Mode --
-    // registered for correct automation/state save-load; Delta Listen Mode's actual
-    // audio processing isn't ported yet (see PluginProcessor.h), so this has no audible
-    // effect until that stage.
+    // see processBlock's Bypass > Delta > Normal selection for the actual signal-path
+    // implementation.
     layout.add (std::make_unique<juce::AudioParameterChoice> (
         juce::ParameterID { "listen_mode", 1 },
         "Listen Mode",
@@ -103,11 +104,10 @@ juce::AudioProcessorValueTreeState::ParameterLayout WishcraftMasteringLimiterAud
         juce::NormalisableRange<float> (-18.0f, 0.0f, 0.01f),
         -1.0f));
 
-    // JSFX slider6:lookahead_ms=3<0.5,20,0.1>-Limiter Lookahead (ms) -- registered for
-    // correct automation/state save-load; Limiter.h still sizes its lookahead buffer
-    // from its own fixed lookaheadMsFixed=3.0 constant (matching this parameter's
-    // default) rather than reading this value, so it has no audible effect yet (see
-    // PluginProcessor.h).
+    // JSFX slider6:lookahead_ms=3<0.5,20,0.1>-Limiter Lookahead (ms). A change is
+    // treated exactly like an os_choice change (full reconfigure/state reset, see
+    // processBlock's top-of-block check and PluginProcessor.h's lookaheadParam
+    // comment), matching the JSFX's own @slider behavior.
     layout.add (std::make_unique<juce::AudioParameterFloat> (
         juce::ParameterID { "lookahead_ms", 1 },
         "Limiter Lookahead",
@@ -337,7 +337,8 @@ void WishcraftMasteringLimiterAudioProcessor::prepareToPlay (double sampleRate, 
     metering.prepare (sampleRate);
 
     currentOsChoiceIndex = -1; // forces reconfigureEngine() to run on the first block
-    reconfigureEngine (osChoiceParam->getIndex());
+    currentLookaheadMs = -1.0;
+    reconfigureEngine (osChoiceParam->getIndex(), (double) lookaheadParam->get());
 }
 
 void WishcraftMasteringLimiterAudioProcessor::releaseResources()
@@ -355,24 +356,29 @@ bool WishcraftMasteringLimiterAudioProcessor::isBusesLayoutSupported (const Buse
 // JSFX @slider's (os_choice != last_os_choice) check, run at the top of the block
 // instead since JUCE has no per-parameter-change callback guarantee as tight as
 // REAPER's @slider -- functionally the same "only reconfigure when it actually
-// changed" behaviour reconfigure()/@init implement.
-void WishcraftMasteringLimiterAudioProcessor::reconfigureEngine (int osChoiceIndex)
+// changed" behaviour reconfigure()/@init implement. lookahead_ms is watched the same
+// way and treated identically (a hard reset, not a smoothed change), matching the
+// JSFX's own @slider exactly.
+void WishcraftMasteringLimiterAudioProcessor::reconfigureEngine (int osChoiceIndex, double lookaheadMs)
 {
     currentOsChoiceIndex = osChoiceIndex;
+    currentLookaheadMs = lookaheadMs;
     const int factor = (osChoiceIndex == 0) ? 2 : (osChoiceIndex == 1) ? 4 : 8;
     const double osRate = currentSampleRate * factor;
 
     oversamplerL.setFactor (factor);
     oversamplerR.setFactor (factor);
     selectiveClipper.setFactor (factor, osRate);
-    limiter.setFactor (factor, osRate);
+    limiter.setFactor (factor, osRate, lookaheadMs);
     truePeakLimiter.setFactor (factor, osRate);
     metering.setFactor (osRate);
 
     // JSFX @block: pdc_delay = DELAY_SAMPLES_BASE + CHAR_BUDGET_BASE + LA_BUDGET_BASE.
     // Now also includes the True Peak Limiter's own lookahead budget (a genuine addition
     // over the JSFX, not a straight port). Factor-independent by construction, same as
-    // the JSFX -- switching 2x/4x/8x never changes the reported latency.
+    // the JSFX (switching 2x/4x/8x never changes the reported latency on its own) --
+    // but LA_BUDGET_BASE itself now genuinely varies with the Lookahead knob, same as
+    // the JSFX's own reported latency does.
     setLatencySamples (PolyphaseOversampler::delaySamplesBase
                         + selectiveClipper.getCharBudgetBase()
                         + limiter.getLaBudgetBase()
@@ -386,8 +392,9 @@ void WishcraftMasteringLimiterAudioProcessor::processBlock (juce::AudioBuffer<fl
     juce::ScopedNoDenormals noDenormals;
 
     const int osChoiceIndex = osChoiceParam->getIndex();
-    if (osChoiceIndex != currentOsChoiceIndex)
-        reconfigureEngine (osChoiceIndex);
+    const double lookaheadMs = (double) lookaheadParam->get();
+    if (osChoiceIndex != currentOsChoiceIndex || ! juce::exactlyEqual (lookaheadMs, currentLookaheadMs))
+        reconfigureEngine (osChoiceIndex, lookaheadMs);
 
     jassert (buffer.getNumChannels() == 2);
     auto* left  = buffer.getWritePointer (0);

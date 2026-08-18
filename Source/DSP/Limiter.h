@@ -61,13 +61,7 @@ public:
     static constexpr double releaseFastMinMs = 20.0,  releaseFastMaxMs = 100.0;
     static constexpr double releaseSlowMinMs = 300.0, releaseSlowMaxMs = 1500.0;
 
-    static constexpr double laMaxMsCeiling = 20.0; // JSFX LA_MAX_MS_CEILING
-
-    // JSFX slider6 (lookahead_ms) default -- not yet exposed as a parameter this stage;
-    // the lookahead buffer is sized as if it were fixed here, matching what a freshly-
-    // loaded, untouched JSFX instance would use. For a valid A/B, keep the JSFX's own
-    // Lookahead slider at its default (3.0 ms) too.
-    static constexpr double lookaheadMsFixed = 3.0;
+    static constexpr double laMaxMsCeiling = 20.0; // JSFX LA_MAX_MS_CEILING -- also lookahead_ms's own param max, so this sizes the worst-case allocation
 
     void prepare (double sampleRate)
     {
@@ -94,13 +88,17 @@ public:
     }
 
     // JSFX reconfigure(): recomputes everything that depends on factor/sample rate, and
-    // clears all state/buffers -- an oversampling factor change is a deliberate hard reset.
-    void setFactor (int factor, double osRate)
+    // clears all state/buffers -- an oversampling factor change is a deliberate hard
+    // reset. lookaheadMs (JSFX slider6) is now wired the same way the JSFX itself wires
+    // it: a lookahead_ms change is treated identically to an os_choice change, calling
+    // this same reconfigure/hard-reset path (see PluginProcessor.cpp's top-of-block
+    // check) -- not smoothed/ramped, matching the JSFX exactly.
+    void setFactor (int factor, double osRate, double lookaheadMs)
     {
         currentFactor = factor;
         this->osRate = osRate;
 
-        laBudgetBase = (int) std::ceil (lookaheadMsFixed * 0.001 * sampleRate);
+        laBudgetBase = (int) std::ceil (lookaheadMs * 0.001 * sampleRate);
         laBufSize = laBudgetBase * factor;
 
         left.reset (laBufSize);

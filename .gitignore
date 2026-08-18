@@ -1,2 +1,4 @@
 build/
 .DS_Store
+Packaging/macOS/work/
+Packaging/macOS/dist/

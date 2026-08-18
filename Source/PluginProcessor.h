@@ -57,7 +57,7 @@ public:
 
 private:
     //==============================================================================
-    void reconfigureEngine (int osChoiceIndex);
+    void reconfigureEngine (int osChoiceIndex, double lookaheadMs);
 
     static juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
 
@@ -113,16 +113,12 @@ private:
     // processBlock for the actual signal-path implementation.
     juce::AudioParameterChoice* listenModeParam = nullptr;
 
-    // JSFX slider6 (lookahead_ms) is registered in createParameterLayout() -- with the
-    // JSFX's exact range/default -- so it's properly automatable and saves/loads
-    // correctly, but isn't cached as a raw pointer here because nothing reads it yet:
-    // Limiter.h still sizes its lookahead buffer from its own fixed
-    // lookaheadMsFixed=3.0 constant rather than this parameter (their defaults match,
-    // so leaving it at default is behaviorally identical). A future stage that wires
-    // this up needs to do more than resize a buffer, too -- the JSFX's own @slider
-    // treats a lookahead_ms change exactly like an os_choice change, triggering a full
-    // reconfigure()/state reset, and it changes the reported PDC latency
-    // (LA_BUDGET_BASE feeds pdc_delay) -- neither of which this port currently does.
+    // JSFX slider6: lookahead_ms -- Limiter Lookahead. Wired the same way the JSFX
+    // itself wires it: a change is treated exactly like an os_choice change, triggering
+    // a full reconfigureEngine()/state reset (see processBlock's top-of-block check)
+    // and changing the reported PDC latency (Limiter::getLaBudgetBase() feeds
+    // setLatencySamples()).
+    juce::AudioParameterFloat* lookaheadParam = nullptr;
 
     // TEMPORARY debug readouts, updated once per block: no real GUI/meter display exists
     // yet, so these ride JUCE's generic parameter list as a way to verify the numbers.
@@ -149,6 +145,7 @@ private:
     Metering metering;
 
     int currentOsChoiceIndex = -1; // forces a reconfigure on the first block
+    double currentLookaheadMs = -1.0; // forces a reconfigure on the first block
     double currentSampleRate = 44100.0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (WishcraftMasteringLimiterAudioProcessor)
