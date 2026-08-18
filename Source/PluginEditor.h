@@ -82,6 +82,7 @@ private:
     std::unique_ptr<WishcraftHSlider> thresholdSlider;
     std::unique_ptr<WishcraftHSlider> selectivitySlider;
     std::unique_ptr<WishcraftButton> deltaButton;
+    std::unique_ptr<WishcraftKnob> deltaTrimKnob;
     std::unique_ptr<WishcraftHSlider> scLowSlider;
     std::unique_ptr<WishcraftHSlider> scHighSlider;
 

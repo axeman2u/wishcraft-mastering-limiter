@@ -285,6 +285,9 @@ def build():
         ["Delta", "On/Off", "Off", "Solos what the Selective Clipper is removing, gained "
          "up so it's audible. For dialing in Threshold and Selectivity by ear — turn "
          "off before rendering."],
+        ["Delta Trim", "−12 to +12 dB", "0.0 dB", "Only shown while Delta is on. Delta's "
+         "boost can be startlingly loud with aggressive clipping — trim it down here. "
+         "0.0 dB leaves Delta's boost unchanged."],
     ], col_widths))
 
     story.append(Paragraph("Gain", styles["H2"]))

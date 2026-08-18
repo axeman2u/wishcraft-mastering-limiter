@@ -13,7 +13,6 @@ into the limiter" control, not a plain input trim.
 These were settled by ear and deliberately removed from the slider list. The JUCE port must
 NOT turn these back into user-facing parameters:
 - `CHAR_MAX_MS = 5.0` — Selective Clipper excursion window
-- `DELTA_GAIN_DB = 6.0` — Delta listen mode gain compensation
 
 ## Selective Clipper (formerly "Character")
 - Duration-gated pre-clip stage with sidechain-filtered detection
@@ -22,6 +21,12 @@ NOT turn these back into user-facing parameters:
   respects whatever the Selectivity slider is actually set to — it must NOT force 100%/Aggressive
 - Dry-path buffers must be delay-matched sample-for-sample to the wet path, or the delta
   comparison is meaningless (this was a previously-fixed bug — don't reintroduce it)
+- `DELTA_GAIN_DB = 6.0` — fixed base gain compensation for Delta's raw (typically very
+  quiet) difference signal. **No longer un-adjustable**: aggressive clipping made this
+  boost startlingly loud, so a **Delta Trim** knob (`delta_trim_db`, not a JSFX slider,
+  ±12 dB, default 0.0 dB) was added on top of it per explicit user request, added to
+  DELTA_GAIN_DB in dB before conversion to linear gain. 0.0 dB reproduces the original
+  fixed-6dB behavior exactly. Only visible in the GUI while Delta Listen Mode is on.
 
 ## Limiter Core
 - Lookahead + program-dependent release using a **two-time-constant history blend** (not a
@@ -107,6 +112,7 @@ NOT turn these back into user-facing parameters:
 - Group labels: **GAIN**, **SELECTIVE CLIPPER**, **SHAPING EQ**, **LIMITER**, **UTILITY**,
   and meter columns **SELECTIVE CLIP**, **GAIN REDUCTION**, **OUTPUT**
 - Listen Mode options: "Normal" / "Delta (what was removed)"
+- **Delta Trim** knob in SELECTIVE CLIPPER: only visible while Delta Listen Mode is on
 - Oversampling Factor (`os_choice`): three options, **2x** / **4x** / **8x**
 - Do not resurrect the old "Character" label anywhere in the UI
 - "SHAPING EQ" (renamed from "SIDECHAIN EQ"): the internal DSP concept is still

@@ -112,6 +112,13 @@ private:
     // JSFX slider4: listen_mode -- Delta Listen Mode. See PluginProcessor.cpp's
     // processBlock for the actual signal-path implementation.
     juce::AudioParameterChoice* listenModeParam = nullptr;
+    // NOT a JSFX slider -- added after the port, per explicit user request, because the
+    // fixed +6 dB Delta boost (SelectiveClipper::deltaGainDb) can be startlingly loud
+    // with aggressive clipping. Added to deltaGainDb (in dB) before conversion to linear
+    // gain in processBlock's Delta branch; 0.0 dB default reproduces the original fixed
+    // behavior exactly. This supersedes the older "DELTA_GAIN_DB must not become a
+    // parameter" note in Wishcraft_Limiter_Spec.md, which predates this request.
+    juce::AudioParameterFloat* deltaTrimParam = nullptr;
 
     // JSFX slider6: lookahead_ms -- Limiter Lookahead. Wired the same way the JSFX
     // itself wires it: a change is treated exactly like an os_choice change, triggering

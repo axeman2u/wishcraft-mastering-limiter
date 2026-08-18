@@ -25,6 +25,7 @@ WishcraftMasteringLimiterAudioProcessor::WishcraftMasteringLimiterAudioProcessor
     scHighShelfParam     = dynamic_cast<juce::AudioParameterFloat*>  (apvts.getParameter ("sc_high_shelf_db"));
     bypassParam          = dynamic_cast<juce::AudioParameterBool*>   (apvts.getParameter ("bypass"));
     listenModeParam      = dynamic_cast<juce::AudioParameterChoice*> (apvts.getParameter ("listen_mode"));
+    deltaTrimParam       = dynamic_cast<juce::AudioParameterFloat*>  (apvts.getParameter ("delta_trim_db"));
 
     grMeterLParam       = dynamic_cast<juce::AudioParameterFloat*> (apvts.getParameter ("gr_meter_l"));
     grMeterRParam       = dynamic_cast<juce::AudioParameterFloat*> (apvts.getParameter ("gr_meter_r"));
@@ -42,7 +43,7 @@ WishcraftMasteringLimiterAudioProcessor::WishcraftMasteringLimiterAudioProcessor
              && inputGainParam != nullptr
              && outputCeilingParam != nullptr && linkParam != nullptr && limiterAutoGainParam != nullptr
              && scLowShelfParam != nullptr && scHighShelfParam != nullptr && bypassParam != nullptr
-             && listenModeParam != nullptr
+             && listenModeParam != nullptr && deltaTrimParam != nullptr
              && grMeterLParam != nullptr && grMeterRParam != nullptr && peakMeterLParam != nullptr
              && peakMeterRParam != nullptr && charMeterLParam != nullptr && charMeterRParam != nullptr
              && dynamicRangeParam != nullptr && lufsParam != nullptr && overYellowParam != nullptr
@@ -93,6 +94,16 @@ juce::AudioProcessorValueTreeState::ParameterLayout WishcraftMasteringLimiterAud
         "Listen Mode",
         juce::StringArray { "Normal", "Delta (what was removed)" },
         0));
+
+    // NOT a JSFX slider -- added after the port. The fixed +6 dB Delta boost
+    // (SelectiveClipper::deltaGainDb) can be startlingly loud when clipping
+    // aggressively; this trim is added on top of that fixed value (see processBlock's
+    // Delta branch), so 0.0 dB default reproduces the original fixed behavior exactly.
+    layout.add (std::make_unique<juce::AudioParameterFloat> (
+        juce::ParameterID { "delta_trim_db", 1 },
+        "Delta Trim",
+        juce::NormalisableRange<float> (-12.0f, 12.0f, 0.1f),
+        0.0f));
 
     // JSFX slider5:ceiling_db=-1<-18,0,0.01>-Limiter Ceiling (dB) -- displayed as
     // "Threshold" (param ID kept as ceiling_db for automation/state compatibility): a
@@ -296,7 +307,7 @@ void WishcraftMasteringLimiterAudioProcessor::setCurrentProgram (int index)
     static constexpr const char* realParamIds[] = {
         "os_choice", "threshold_db", "selectivity", "listen_mode", "ceiling_db",
         "lookahead_ms", "release_pct", "input_gain_db", "output_ceiling_db", "link_pct",
-        "sc_low_shelf_db", "sc_high_shelf_db", "bypass", "limiter_auto_gain"
+        "sc_low_shelf_db", "sc_high_shelf_db", "bypass", "limiter_auto_gain", "delta_trim_db"
     };
     for (auto* id : realParamIds)
         if (auto* param = apvts.getParameter (id))
@@ -424,6 +435,7 @@ void WishcraftMasteringLimiterAudioProcessor::processBlock (juce::AudioBuffer<fl
         truePeakLimiter.setTargetCeiling (limiter.getOutputCeilingSmoothed());
         const bool bypassOn = bypassParam->get();
         const bool listenModeOn = listenModeParam->getIndex() > 0;
+        const double deltaTrimDb = (double) deltaTrimParam->get();
 
         oversamplerL.upsample ((double) left[n],  upL);
         oversamplerR.upsample ((double) right[n], upR);
@@ -540,7 +552,10 @@ void WishcraftMasteringLimiterAudioProcessor::processBlock (juce::AudioBuffer<fl
             // (Delta-substituted, already safety-clipped) Character-only output,
             // boosted by DELTA_GAIN_DB since the raw difference is typically very
             // quiet -- matches the JSFX's spl0 = (out_dry_L - out_L) * delta_gain_lin.
-            static const double deltaGainLin = std::pow (10.0, SelectiveClipper::deltaGainDb / 20.0);
+            // deltaTrimDb (not in the JSFX -- see PluginProcessor.h's deltaTrimParam
+            // comment) is added on top so aggressive clipping's Delta output can be
+            // pulled down from the surprisingly-loud fixed +6 dB default.
+            const double deltaGainLin = std::pow (10.0, (SelectiveClipper::deltaGainDb + deltaTrimDb) / 20.0);
             finalOutL = (outDryGainedL - outL) * deltaGainLin;
             finalOutR = (outDryGainedR - outR) * deltaGainLin;
             finalOutL = safetyClip.clip (finalOutL);

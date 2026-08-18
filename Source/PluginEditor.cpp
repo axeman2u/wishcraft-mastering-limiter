@@ -52,6 +52,15 @@ WishcraftMasteringLimiterAudioProcessorEditor::WishcraftMasteringLimiterAudioPro
         rangedParam ("listen_mode"), "Delta", StudioConsoleTheme::accentAmber);
     contentComponent.addAndMakeVisible (*deltaButton);
 
+    deltaTrimKnob = std::make_unique<WishcraftKnob> (
+        rangedParam ("delta_trim_db"), "Delta Trim",
+        [] (float v) { return juce::String (v, 1) + " dB"; });
+    // Only meaningful while Delta Listen Mode is on -- starts hidden (addChildComponent,
+    // not addAndMakeVisible, matching the helpOverlay pattern above) and its visibility
+    // is kept in sync with the Delta toggle in timerCallback().
+    contentComponent.addChildComponent (*deltaTrimKnob);
+    deltaTrimKnob->setVisible (rangedParam ("listen_mode").getValue() > 0.5f);
+
     scLowSlider = std::make_unique<WishcraftHSlider> (
         rangedParam ("sc_low_shelf_db"), "Low",
         [] (float v) { return juce::String (v, 1) + " dB"; }, "-6", "+6");
@@ -182,7 +191,10 @@ void WishcraftMasteringLimiterAudioProcessorEditor::layoutContent()
     // clipper first, then use Input Gain to drive the limiter -- not the other way
     // around. A pure layout swap; the underlying processing order never changes.
     constexpr int c1X = 10, c1W = 220;
-    constexpr int inH = 126, chH = 196, scH = 172;
+    // chH grew by 48px (was 196) to fit the Delta Trim knob beside the Delta button --
+    // still comfortably inside the fixed designH=640 canvas (was 62px of slack below
+    // the columns before this change, 14px after).
+    constexpr int inH = 126, chH = 244, scH = 172;
     constexpr int colH = inH + chH + scH + gap * 2;
     const int chY = colTop;
     const int inY = chY + chH + gap;
@@ -194,8 +206,9 @@ void WishcraftMasteringLimiterAudioProcessorEditor::layoutContent()
         thresholdSlider->setBounds (interior.removeFromTop (hsliderH));
         selectivitySlider->setBounds (interior.removeFromTop (hsliderH));
         interior.removeFromTop (4);
-        auto row = interior.removeFromTop (22);
-        deltaButton->setBounds (juce::Rectangle<int> (70, 22).withCentre (row.getCentre()));
+        auto row = interior.removeFromTop (70);
+        deltaButton->setBounds (juce::Rectangle<int> (70, 22).withCentre ({ row.getX() + row.getWidth() / 4, row.getCentreY() }));
+        deltaTrimKnob->setBounds (juce::Rectangle<int> (70, 70).withCentre ({ row.getX() + row.getWidth() * 3 / 4, row.getCentreY() }));
     }
 
     gainGroup.setBounds (c1X, inY, c1W, inH);
@@ -262,4 +275,9 @@ void WishcraftMasteringLimiterAudioProcessorEditor::timerCallback()
     selectiveClipColumn.updateFromMetering (metering);
     gainReductionColumn.updateFromMetering (metering);
     outputColumn.updateFromMetering (metering);
+
+    // Delta Trim only means anything while Delta Listen Mode is on -- keeps it hidden
+    // the rest of the time, including when a host automates/loads listen_mode rather
+    // than the user clicking deltaButton directly.
+    deltaTrimKnob->setVisible (rangedParam ("listen_mode").getValue() > 0.5f);
 }
