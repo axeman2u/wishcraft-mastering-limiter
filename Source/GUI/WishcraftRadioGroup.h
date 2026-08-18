@@ -3,7 +3,7 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_gui_basics/juce_gui_basics.h>
 
-#include "WishcraftColours.h"
+#include "LookAndFeel/StudioConsolePainter.h"
 
 // Mutually-exclusive N-option radio group, matching the JSFX's radio_button_interact()
 // pattern: clicking any option sets the parameter to that option's value outright --
@@ -82,14 +82,7 @@ private:
 
     void paintOption (juce::Graphics& g, juce::Rectangle<int> r, bool on, const juce::String& text)
     {
-        auto rf = r.toFloat();
-        g.setColour (on ? onColour : WishcraftColours::buttonOff);
-        g.fillRect (rf);
-        g.setColour (WishcraftColours::buttonBorder);
-        g.drawRect (rf, 1.0f);
-        g.setColour (on ? WishcraftColours::buttonLabelOnBg : WishcraftColours::buttonLabelOffBg);
-        g.setFont (juce::FontOptions (13.0f));
-        g.drawText (text, r, juce::Justification::centred, false);
+        StudioConsolePainter::paintToggleChrome (g, r.toFloat(), on, onColour, text, 4.0f);
     }
 
     juce::RangedAudioParameter& param;

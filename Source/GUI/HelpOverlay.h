@@ -2,7 +2,7 @@
 
 #include <juce_gui_basics/juce_gui_basics.h>
 
-#include "WishcraftColours.h"
+#include "LookAndFeel/StudioConsoleTheme.h"
 
 // Stage 11: Quick Start help. Net-new -- the JSFX has no equivalent -- so this is pure
 // UX addition, not a port. Kept deliberately lightweight: one scrollable panel, plain
@@ -31,18 +31,25 @@ public:
 private:
     void addHeader (const juce::String& text)
     {
-        attributedText.append (text + "\n", juce::FontOptions (15.0f, juce::Font::bold), WishcraftColours::groupLabel);
+        attributedText.append (text + "\n", juce::FontOptions (15.0f, juce::Font::bold), StudioConsoleTheme::groupLabel);
     }
 
     void addBody (const juce::String& text)
     {
-        attributedText.append (text + "\n\n", juce::FontOptions (13.5f), WishcraftColours::controlValueText);
+        attributedText.append (text + "\n\n", juce::FontOptions (13.5f), StudioConsoleTheme::controlValueText);
     }
 
     void addTip (const juce::String& label, const juce::String& text)
     {
-        attributedText.append (label + " ", juce::FontOptions (13.5f, juce::Font::bold), WishcraftColours::lufsLabel);
-        attributedText.append (text + "\n\n", juce::FontOptions (13.5f), WishcraftColours::controlValueText);
+        attributedText.append (label + " ", juce::FontOptions (13.5f, juce::Font::bold), StudioConsoleTheme::lufsLabel);
+        attributedText.append (text + "\n\n", juce::FontOptions (13.5f), StudioConsoleTheme::controlValueText);
+    }
+
+    // Fine print -- smaller and dimmer than the rest of the content, so the credit is
+    // present without competing with the actual how-to-use-it material above it.
+    void addCopyright (const juce::String& text)
+    {
+        attributedText.append (text, juce::FontOptions (11.0f), StudioConsoleTheme::controlEndLabel);
     }
 
     void buildText()
@@ -102,6 +109,14 @@ private:
                  "how hard the Limiter is working. OUTPUT shows final peak level plus Dynamic Range and "
                  "short-term LUFS -- the dot beside each channel turns yellow past your TP Limit, red "
                  "past true 0 dBFS.");
+
+        // juce::String's plain const char* constructor assumes ASCII/Latin-1, not
+        // UTF-8 (see its own doc comment in juce_String.cpp) -- the raw UTF-8 bytes for
+        // "\xc2\xa9" (c) would get decoded as two separate Latin-1 characters ("Â" then
+        // "©") instead of one, so this needs the explicit CharPointer_UTF8 wrapper.
+        addCopyright (juce::String (juce::CharPointer_UTF8 (
+            "Wishcraft Mastering Limiter -- concept, design, and specification by Glenn Burgos.\n"
+            "\xc2\xa9 2026 Glenn Burgos.")));
     }
 
     juce::AttributedString attributedText;
@@ -122,12 +137,12 @@ public:
 
         titleLabel.setText ("QUICK START", juce::dontSendNotification);
         titleLabel.setFont (juce::FontOptions (16.0f, juce::Font::bold));
-        titleLabel.setColour (juce::Label::textColourId, WishcraftColours::titleText);
+        titleLabel.setColour (juce::Label::textColourId, StudioConsoleTheme::titleText);
         addAndMakeVisible (titleLabel);
 
         closeButton.setButtonText ("X");
-        closeButton.setColour (juce::TextButton::buttonColourId, WishcraftColours::buttonOff);
-        closeButton.setColour (juce::TextButton::textColourOffId, WishcraftColours::controlValueText);
+        closeButton.setColour (juce::TextButton::buttonColourId, StudioConsoleTheme::buttonOff);
+        closeButton.setColour (juce::TextButton::textColourOffId, StudioConsoleTheme::controlValueText);
         closeButton.onClick = [this] { setVisible (false); };
         addAndMakeVisible (closeButton);
 
@@ -155,13 +170,19 @@ public:
 
     void paint (juce::Graphics& g) override
     {
-        g.setColour (WishcraftColours::background.withAlpha (0.75f));
+        g.setColour (StudioConsoleTheme::background.withAlpha (0.75f));
         g.fillRect (getLocalBounds());
 
-        g.setColour (WishcraftColours::groupBackground.withAlpha (1.0f));
-        g.fillRect (panelBounds);
-        g.setColour (WishcraftColours::groupBorder);
-        g.drawRect (panelBounds, 1);
+        constexpr float cornerRadius = 6.0f;
+        juce::DropShadow shadow (juce::Colours::black.withAlpha (0.5f), 18, {});
+        juce::Path panelPath;
+        panelPath.addRoundedRectangle (panelBounds.toFloat(), cornerRadius);
+        shadow.drawForPath (g, panelPath);
+
+        g.setGradientFill (StudioConsoleTheme::panelFill (panelBounds.toFloat()));
+        g.fillRoundedRectangle (panelBounds.toFloat(), cornerRadius);
+        g.setColour (StudioConsoleTheme::groupBorder);
+        g.drawRoundedRectangle (panelBounds.toFloat(), cornerRadius, 1.0f);
     }
 
     void mouseDown (const juce::MouseEvent& e) override

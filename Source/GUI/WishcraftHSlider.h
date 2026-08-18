@@ -5,7 +5,8 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_gui_basics/juce_gui_basics.h>
 
-#include "WishcraftColours.h"
+#include "LookAndFeel/StudioConsolePainter.h"
+#include "LookAndFeel/StudioConsoleTheme.h"
 
 // Horizontal slider matching the JSFX's draw_hslider() + hslider_interact(): a track
 // with a center tick and a thumb, label above (centered over the control, per this
@@ -51,29 +52,26 @@ public:
 
     void paint (juce::Graphics& g) override
     {
-        g.setColour (WishcraftColours::controlLabel);
+        g.setColour (StudioConsoleTheme::controlLabel);
         g.setFont (juce::FontOptions (13.0f));
         g.drawText (label, labelBounds, juce::Justification::centred, false);
 
         auto trackF = trackBounds.toFloat().withSizeKeepingCentre ((float) trackBounds.getWidth(), 6.0f);
-        g.setColour (WishcraftColours::sliderTrack);
-        g.fillRect (trackF);
-        g.setColour (WishcraftColours::sliderBorder);
-        g.drawRect (trackF, 1.0f);
-        g.setColour (WishcraftColours::sliderCenterTick);
+        StudioConsolePainter::paintTrack (g, trackF);
+        g.setColour (StudioConsoleTheme::sliderCenterTick);
         g.drawVerticalLine ((int) trackF.getCentreX(), (float) trackBounds.getY() - 2.0f, (float) trackBounds.getBottom() + 2.0f);
 
         const float norm = juce::jlimit (0.0f, 1.0f, param.convertTo0to1 (currentValue));
         const float thumbX = (float) trackBounds.getX() + norm * (float) trackBounds.getWidth();
-        g.setColour (WishcraftColours::sliderThumb);
-        g.fillRect (juce::Rectangle<float> (8.0f, 18.0f).withCentre ({ thumbX, trackF.getCentreY() }));
+        StudioConsolePainter::paintThumb (g, juce::Rectangle<float> (9.0f, 18.0f).withCentre ({ thumbX, trackF.getCentreY() }),
+                                           StudioConsoleTheme::knobNeedle);
 
-        g.setColour (WishcraftColours::controlEndLabel);
+        g.setColour (StudioConsoleTheme::controlEndLabel);
         g.setFont (juce::FontOptions (12.0f));
         g.drawText (lowLabel, endLabelBounds, juce::Justification::centredLeft, false);
         g.drawText (highLabel, endLabelBounds, juce::Justification::centredRight, false);
 
-        g.setColour (WishcraftColours::controlValueText);
+        g.setColour (StudioConsoleTheme::controlValueText);
         g.setFont (juce::FontOptions (13.0f));
         g.drawText (formatter (currentValue), valueBounds, juce::Justification::centred, false);
     }

@@ -2,7 +2,8 @@
 
 #include <juce_gui_basics/juce_gui_basics.h>
 
-#include "WishcraftColours.h"
+#include "LookAndFeel/StudioConsolePainter.h"
+#include "LookAndFeel/StudioConsoleTheme.h"
 
 // Dynamic Range span indicator, matching the JSFX's draw_range_bar(): a single narrow
 // bar showing the min-to-max span, no live/current marker -- this widget's whole
@@ -25,18 +26,16 @@ public:
     void paint (juce::Graphics& g) override
     {
         auto bounds = getLocalBounds().toFloat();
-        g.setColour (WishcraftColours::meterBackground);
+        g.setColour (StudioConsoleTheme::meterBackground);
         g.fillRect (bounds);
-        g.setColour (WishcraftColours::meterBorder);
-        g.drawRect (bounds, 1.0f);
 
         const float yHi = bounds.getBottom() - hiFrac * bounds.getHeight();
         const float yLo = bounds.getBottom() - loFrac * bounds.getHeight();
         if (yLo > yHi)
-        {
-            g.setColour (WishcraftColours::rangeBar);
-            g.fillRect (juce::Rectangle<float> (bounds.getX(), yHi, bounds.getWidth(), yLo - yHi));
-        }
+            StudioConsolePainter::paintMeterFill (g, { bounds.getX(), yHi, bounds.getWidth(), yLo - yHi }, StudioConsoleTheme::rangeBar, true);
+
+        g.setColour (StudioConsoleTheme::meterBorder);
+        g.drawRect (bounds, 1.0f);
     }
 
 private:

@@ -3,27 +3,22 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 
 #include "../DSP/Metering.h"
-#include "WishcraftColours.h"
+#include "LookAndFeel/StudioConsolePainter.h"
+#include "LookAndFeel/StudioConsoleTheme.h"
 #include "WishcraftRangeBar.h"
 #include "WishcraftVMeter.h"
 
 // The three meter columns from the JSFX's @gfx section (COLUMNS 3-5), each polled once
 // per editor timer tick via updateFromMetering() -- pure display, no interaction. Group
-// panel background/border/label are painted directly here (same treatment as
-// GroupPanel, just combined with the readouts so column-specific text and generic panel
-// chrome share one paint() call).
+// panel chrome is just StudioConsolePainter::paintPanelChrome, same as GroupPanel.h --
+// kept as a thin wrapper here so column-specific text and generic panel chrome still
+// share one paint() call.
 
 namespace WishcraftMeterColumnDetail
 {
     inline void paintGroupChrome (juce::Graphics& g, juce::Rectangle<int> bounds, const juce::String& label)
     {
-        g.setColour (WishcraftColours::groupBackground);
-        g.fillRect (bounds.toFloat());
-        g.setColour (WishcraftColours::groupBorder);
-        g.drawRect (bounds.toFloat(), 1.0f);
-        g.setColour (WishcraftColours::groupLabel);
-        g.setFont (juce::FontOptions (14.0f, juce::Font::bold));
-        g.drawText (label, bounds.reduced (8, 4).withHeight (20), juce::Justification::topLeft, false);
+        StudioConsolePainter::paintPanelChrome (g, bounds, label);
     }
 }
 
@@ -68,19 +63,19 @@ public:
         auto readouts = readoutBounds; // local copy -- paint() runs every repaint, don't consume the member
         auto lRow = readouts.removeFromTop (20);
         auto rRow = readouts.removeFromTop (20);
-        g.setColour (WishcraftColours::readoutLabel);
+        g.setColour (StudioConsoleTheme::readoutLabel);
         g.drawText ("L " + juce::String (heldL, 2) + " dB", lRow.reduced (8, 0), juce::Justification::centredLeft, false);
         g.drawText ("R " + juce::String (heldR, 2) + " dB", rRow.reduced (8, 0), juce::Justification::centredLeft, false);
 
-        g.setColour (WishcraftColours::scaleLabel);
+        g.setColour (StudioConsoleTheme::scaleLabel);
         g.setFont (juce::FontOptions (12.0f));
         g.drawText ("0dB", scaleTopBounds.reduced (8, 0), juce::Justification::centredLeft, false);
         g.drawText ("-12dB", scaleBottomBounds.reduced (8, 0), juce::Justification::centredLeft, false);
     }
 
 private:
-    WishcraftVMeter meterL { WishcraftColours::charMeterL, true };
-    WishcraftVMeter meterR { WishcraftColours::charMeterR, true };
+    WishcraftVMeter meterL { StudioConsoleTheme::charMeterL, true };
+    WishcraftVMeter meterR { StudioConsoleTheme::charMeterR, true };
     float heldL = 0.0f, heldR = 0.0f;
     juce::Rectangle<int> readoutBounds, scaleTopBounds, scaleBottomBounds;
 };
@@ -126,19 +121,19 @@ public:
         auto readouts = readoutBounds; // local copy -- paint() runs every repaint, don't consume the member
         auto lRow = readouts.removeFromTop (20);
         auto rRow = readouts.removeFromTop (20);
-        g.setColour (WishcraftColours::readoutLabel);
+        g.setColour (StudioConsoleTheme::readoutLabel);
         g.drawText ("L " + juce::String (heldL, 2) + " dB", lRow.reduced (8, 0), juce::Justification::centredLeft, false);
         g.drawText ("R " + juce::String (heldR, 2) + " dB", rRow.reduced (8, 0), juce::Justification::centredLeft, false);
 
-        g.setColour (WishcraftColours::scaleLabel);
+        g.setColour (StudioConsoleTheme::scaleLabel);
         g.setFont (juce::FontOptions (12.0f));
         g.drawText ("0dB", scaleTopBounds.reduced (8, 0), juce::Justification::centredLeft, false);
         g.drawText ("-24dB", scaleBottomBounds.reduced (8, 0), juce::Justification::centredLeft, false);
     }
 
 private:
-    WishcraftVMeter meterL { WishcraftColours::grMeterL, true };
-    WishcraftVMeter meterR { WishcraftColours::grMeterR, true };
+    WishcraftVMeter meterL { StudioConsoleTheme::grMeterL, true };
+    WishcraftVMeter meterR { StudioConsoleTheme::grMeterR, true };
     float heldL = 0.0f, heldR = 0.0f;
     juce::Rectangle<int> readoutBounds, scaleTopBounds, scaleBottomBounds;
 };
@@ -194,14 +189,14 @@ public:
         auto readouts = readoutBounds; // local copy -- paint() runs every repaint, don't consume the member
         auto lRow = readouts.removeFromTop (18);
         auto rRow = readouts.removeFromTop (18);
-        g.setColour (WishcraftColours::readoutLabel);
+        g.setColour (StudioConsoleTheme::readoutLabel);
         g.drawText ("L " + juce::String (heldL, 2) + " dBTP", lRow.reduced (8, 0), juce::Justification::centredLeft, false);
         g.drawText ("R " + juce::String (heldR, 2) + " dBTP", rRow.reduced (8, 0), juce::Justification::centredLeft, false);
 
         const int dotR = 5;
         auto dotColour = [] (bool red, bool yellow)
         {
-            return red ? WishcraftColours::overRed : (yellow ? WishcraftColours::overYellow : WishcraftColours::overNeutral);
+            return red ? StudioConsoleTheme::overRed : (yellow ? StudioConsoleTheme::overYellow : StudioConsoleTheme::overNeutral);
         };
         g.setColour (dotColour (redL, yellowL));
         g.fillEllipse (juce::Rectangle<float> ((float) (2 * dotR), (float) (2 * dotR))
@@ -213,19 +208,19 @@ public:
         auto extraReadouts = extraReadoutBounds; // local copy -- same reasoning as readouts above
         auto dynRow = extraReadouts.removeFromTop (18);
         auto lufsRow = extraReadouts.removeFromTop (18);
-        g.setColour (WishcraftColours::dynRangeLabel);
+        g.setColour (StudioConsoleTheme::dynRangeLabel);
         g.drawText ("Dyn " + juce::String (dynRangeDb, 1) + " dB", dynRow.reduced (8, 0), juce::Justification::centredLeft, false);
-        g.setColour (WishcraftColours::lufsLabel);
+        g.setColour (StudioConsoleTheme::lufsLabel);
         g.drawText ("ST " + juce::String (lufs, 1) + " LUFS", lufsRow.reduced (8, 0), juce::Justification::centredLeft, false);
 
-        g.setColour (WishcraftColours::scaleLabel);
+        g.setColour (StudioConsoleTheme::scaleLabel);
         g.setFont (juce::FontOptions (12.0f));
         g.drawText ("-18dBTP", scaleBottomBounds.reduced (8, 0), juce::Justification::centredLeft, false);
     }
 
 private:
-    WishcraftVMeter meterL { WishcraftColours::peakMeter, false };
-    WishcraftVMeter meterR { WishcraftColours::peakMeter, false };
+    WishcraftVMeter meterL { StudioConsoleTheme::peakMeter, false };
+    WishcraftVMeter meterR { StudioConsoleTheme::peakMeter, false };
     WishcraftRangeBar rangeBar;
     float heldL = -60.0f, heldR = -60.0f;
     bool yellowL = false, redL = false, yellowR = false, redR = false;

@@ -5,9 +5,10 @@
 
 #include "GUI/GroupPanel.h"
 #include "GUI/HelpOverlay.h"
+#include "GUI/LookAndFeel/StudioConsoleLookAndFeel.h" // not applied here (see its own doc comment) -- included so it stays compiled/verified as part of the normal build
+#include "GUI/LookAndFeel/StudioConsoleTheme.h"
 #include "GUI/MeterColumns.h"
 #include "GUI/WishcraftButton.h"
-#include "GUI/WishcraftColours.h"
 #include "GUI/WishcraftHSlider.h"
 #include "GUI/WishcraftKnob.h"
 #include "GUI/WishcraftRadioGroup.h"

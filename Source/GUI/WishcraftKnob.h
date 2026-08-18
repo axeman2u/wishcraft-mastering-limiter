@@ -6,7 +6,8 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_gui_basics/juce_gui_basics.h>
 
-#include "WishcraftColours.h"
+#include "LookAndFeel/StudioConsolePainter.h"
+#include "LookAndFeel/StudioConsoleTheme.h"
 
 // Rotary knob matching the JSFX's draw_knob() + knob_interact(): a filled circle with a
 // needle line at (-135 + norm*270) degrees, label above (centered over the control, per
@@ -47,28 +48,20 @@ public:
 
     void paint (juce::Graphics& g) override
     {
-        g.setColour (WishcraftColours::controlLabel);
+        g.setColour (StudioConsoleTheme::controlLabel);
         g.setFont (juce::FontOptions (13.0f));
         g.drawText (label, labelBounds, juce::Justification::centred, false);
 
         auto circleF = circleBounds.toFloat();
         const float r = circleF.getWidth() * 0.5f;
-        const auto centre = circleF.getCentre();
 
-        g.setColour (WishcraftColours::knobTrack);
-        g.fillEllipse (circleF);
-        g.setColour (WishcraftColours::knobBorder);
-        g.drawEllipse (circleF, 1.5f);
+        StudioConsolePainter::paintKnobFace (g, circleF);
 
         const float norm = juce::jlimit (0.0f, 1.0f, param.convertTo0to1 (currentValue));
         const float angle = juce::degreesToRadians (-135.0f + norm * 270.0f);
-        const float needleLen = juce::jmax (0.0f, r - 7.0f);
-        const juce::Point<float> tip (centre.x + std::sin (angle) * needleLen,
-                                       centre.y - std::cos (angle) * needleLen);
-        g.setColour (WishcraftColours::knobNeedle);
-        g.drawLine ({ centre, tip }, 2.0f);
+        StudioConsolePainter::paintKnobNeedle (g, circleF.getCentre(), r, angle, StudioConsoleTheme::knobNeedle);
 
-        g.setColour (WishcraftColours::controlValueText);
+        g.setColour (StudioConsoleTheme::controlValueText);
         g.setFont (juce::FontOptions (13.0f));
         g.drawText (formatter (currentValue), valueBounds, juce::Justification::centred, false);
     }

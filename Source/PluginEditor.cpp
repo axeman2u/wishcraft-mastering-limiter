@@ -8,13 +8,13 @@ WishcraftMasteringLimiterAudioProcessorEditor::WishcraftMasteringLimiterAudioPro
 
     titleLabel.setText ("WISHCRAFT MASTERING LIMITER", juce::dontSendNotification);
     titleLabel.setFont (juce::FontOptions (18.0f, juce::Font::bold));
-    titleLabel.setColour (juce::Label::textColourId, WishcraftColours::titleText);
+    titleLabel.setColour (juce::Label::textColourId, StudioConsoleTheme::titleText);
     titleLabel.setJustificationType (juce::Justification::centred);
     contentComponent.addAndMakeVisible (titleLabel);
 
     helpButton.setButtonText ("?");
-    helpButton.setColour (juce::TextButton::buttonColourId, WishcraftColours::buttonOff);
-    helpButton.setColour (juce::TextButton::textColourOffId, WishcraftColours::controlValueText);
+    helpButton.setColour (juce::TextButton::buttonColourId, StudioConsoleTheme::buttonOff);
+    helpButton.setColour (juce::TextButton::textColourOffId, StudioConsoleTheme::controlValueText);
     helpButton.onClick = [this] { helpOverlay.setVisible (true); helpOverlay.toFront (true); };
     contentComponent.addAndMakeVisible (helpButton);
 
@@ -49,7 +49,7 @@ WishcraftMasteringLimiterAudioProcessorEditor::WishcraftMasteringLimiterAudioPro
     contentComponent.addAndMakeVisible (*selectivitySlider);
 
     deltaButton = std::make_unique<WishcraftButton> (
-        rangedParam ("listen_mode"), "Delta", WishcraftColours::buttonYellow);
+        rangedParam ("listen_mode"), "Delta", StudioConsoleTheme::accentAmber);
     contentComponent.addAndMakeVisible (*deltaButton);
 
     scLowSlider = std::make_unique<WishcraftHSlider> (
@@ -89,15 +89,15 @@ WishcraftMasteringLimiterAudioProcessorEditor::WishcraftMasteringLimiterAudioPro
     contentComponent.addAndMakeVisible (*outputCeilingKnob);
 
     autoGainButton = std::make_unique<WishcraftButton> (
-        rangedParam ("limiter_auto_gain"), "Auto Gain", WishcraftColours::buttonYellow);
+        rangedParam ("limiter_auto_gain"), "Auto Gain", StudioConsoleTheme::accentAmber);
     contentComponent.addAndMakeVisible (*autoGainButton);
 
     osChoiceRadio = std::make_unique<WishcraftRadioGroup> (
-        rangedParam ("os_choice"), juce::StringArray { "2x", "4x", "8x" }, WishcraftColours::buttonBlue);
+        rangedParam ("os_choice"), juce::StringArray { "2x", "4x", "8x" }, StudioConsoleTheme::accentBlue);
     contentComponent.addAndMakeVisible (*osChoiceRadio);
 
     bypassButton = std::make_unique<WishcraftButton> (
-        rangedParam ("bypass"), "Bypass", WishcraftColours::buttonYellow);
+        rangedParam ("bypass"), "Bypass", StudioConsoleTheme::accentAmber);
     contentComponent.addAndMakeVisible (*bypassButton);
 
     // ---- Columns 3-5: meters ----
@@ -133,8 +133,13 @@ void WishcraftMasteringLimiterAudioProcessorEditor::paint (juce::Graphics& g)
 {
     // Covers the WHOLE window, including any letterbox/pillarbox margin outside
     // contentComponent's scaled area -- matches the JSFX filling gfx_w x gfx_h (the
-    // actual window), not just its DESIGN_W x DESIGN_H canvas.
-    g.fillAll (WishcraftColours::background);
+    // actual window), not just its DESIGN_W x DESIGN_H canvas. Subtle top-to-bottom
+    // wash rather than a flat fill, matching the Studio Console finish -- soft enough
+    // that it doesn't need to align precisely with contentComponent's own scaled
+    // bounds the way sharper-edged elements would.
+    auto bounds = getLocalBounds().toFloat();
+    g.setGradientFill (StudioConsoleTheme::windowBackground (bounds));
+    g.fillRect (bounds);
 }
 
 void WishcraftMasteringLimiterAudioProcessorEditor::resized()
