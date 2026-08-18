@@ -12,7 +12,11 @@ on:
 
 jobs:
   build-windows:
-    runs-on: windows-latest
+    # Pinned rather than windows-latest: at the time this was written, windows-latest
+    # was mid-transition to a newer runner image on which CMake's "Visual Studio 17
+    # 2022" generator couldn't find any VS install ("could not find any instance of
+    # Visual Studio") -- windows-2022 is the known-good image with VS 2022 preinstalled.
+    runs-on: windows-2022
 
     steps:
       - name: Checkout
