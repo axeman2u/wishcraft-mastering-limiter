@@ -436,6 +436,9 @@ void WishcraftMasteringLimiterAudioProcessor::processBlock (juce::AudioBuffer<fl
         const bool bypassOn = bypassParam->get();
         const bool listenModeOn = listenModeParam->getIndex() > 0;
         const double deltaTrimDb = (double) deltaTrimParam->get();
+        // Shared by the per-tick metering tap below and the final per-host-sample Delta
+        // output further down, so both agree on the same gain.
+        const double deltaGainLin = std::pow (10.0, (SelectiveClipper::deltaGainDb + deltaTrimDb) / 20.0);
 
         oversamplerL.upsample ((double) left[n],  upL);
         oversamplerR.upsample ((double) right[n], upR);
@@ -494,12 +497,21 @@ void WishcraftMasteringLimiterAudioProcessor::processBlock (juce::AudioBuffer<fl
             // Peak meter reads this value BEFORE the oversampled-domain safety clip --
             // matches the original reasoning (tells you how hard the final backstop had
             // to work, not just that it worked). On the Normal path this reflects the
-            // actual TruePeakLimiter-protected true peak; in Delta mode it reflects the
-            // untouched charOnly reference (Delta was never meant to carry the same TP
-            // guarantee as the primary output -- it's a monitoring mode, not a render
-            // path, and its own output still gets safety-clipped after the subtraction
-            // below).
-            metering.updatePeakTick (stageL, stageR);
+            // actual TruePeakLimiter-protected true peak. In Delta mode it must reflect
+            // the actual audible Delta signal (gained-dry minus processed, times
+            // deltaGainLin) rather than the raw unsubtracted charOnly reference -- an
+            // earlier version metered stageL/R directly here, which never moved with
+            // Delta Trim at all, leaving the meter and Over indicators stuck showing the
+            // pre-subtraction/pre-gain reference regardless of how loud Delta's actual
+            // output was. dryGainedDelayedL/R and charOnlyDelayedL/R are already
+            // available every tick (from limiter.processTick above), so this evaluates
+            // the same subtraction the final per-host-sample output uses, just at full
+            // oversampled resolution instead of waiting for the downsampled result.
+            if (listenModeOn)
+                metering.updatePeakTick ((dryGainedDelayedL - charOnlyDelayedL) * deltaGainLin,
+                                          (dryGainedDelayedR - charOnlyDelayedR) * deltaGainLin);
+            else
+                metering.updatePeakTick (stageL, stageR);
 
             // Oversampled-domain safety clip -- applied only to the processed signal,
             // not the raw-dry Bypass reference (matches the JSFX exactly).
@@ -550,12 +562,9 @@ void WishcraftMasteringLimiterAudioProcessor::processBlock (juce::AudioBuffer<fl
         {
             // "What was removed" by the Selective Clipper: gained dry minus the
             // (Delta-substituted, already safety-clipped) Character-only output,
-            // boosted by DELTA_GAIN_DB since the raw difference is typically very
-            // quiet -- matches the JSFX's spl0 = (out_dry_L - out_L) * delta_gain_lin.
-            // deltaTrimDb (not in the JSFX -- see PluginProcessor.h's deltaTrimParam
-            // comment) is added on top so aggressive clipping's Delta output can be
-            // pulled down from the surprisingly-loud fixed +6 dB default.
-            const double deltaGainLin = std::pow (10.0, (SelectiveClipper::deltaGainDb + deltaTrimDb) / 20.0);
+            // boosted by DELTA_GAIN_DB (+ deltaTrimDb, see above) since the raw
+            // difference is typically very quiet -- matches the JSFX's spl0 =
+            // (out_dry_L - out_L) * delta_gain_lin.
             finalOutL = (outDryGainedL - outL) * deltaGainLin;
             finalOutR = (outDryGainedR - outR) * deltaGainLin;
             finalOutL = safetyClip.clip (finalOutL);

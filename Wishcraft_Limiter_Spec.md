@@ -27,6 +27,13 @@ NOT turn these back into user-facing parameters:
   ±12 dB, default 0.0 dB) was added on top of it per explicit user request, added to
   DELTA_GAIN_DB in dB before conversion to linear gain. 0.0 dB reproduces the original
   fixed-6dB behavior exactly. Only visible in the GUI while Delta Listen Mode is on.
+- The Output Peak meter/Over indicators MUST track the actual gained Delta signal
+  (`(dryGainedDelayed - charOnlyDelayed) * deltaGainLin`, i.e. the same math the final
+  downsampled output uses, evaluated at oversampled resolution) while Delta Listen Mode
+  is active — NOT the raw unsubtracted/unboosted charOnly reference. An earlier version
+  metered the raw reference, which never moved with DELTA_GAIN_DB or Delta Trim at all,
+  so the meter stayed pinned even as the actual audible level changed by 10+ dB (a
+  previously-fixed bug — don't reintroduce it).
 
 ## Limiter Core
 - Lookahead + program-dependent release using a **two-time-constant history blend** (not a
