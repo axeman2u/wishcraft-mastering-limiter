@@ -1,6 +1,6 @@
 ; Inno Setup script for Wishcraft Mastering Limiter. Builds a proper installer that
-; places the VST3 in the standard system-wide VST3 folder and the Standalone app +
-; manual in Program Files -- not a zip the user has to place files from manually.
+; places the VST3 in the standard system-wide VST3 folder and the manual in Program
+; Files -- not a zip the user has to place files from manually.
 ;
 ; MyAppVersion defaults below but is normally overridden from CI via
 ; "iscc /DMyAppVersion=1.2.3 installer.iss" so the installer's version always matches
@@ -8,7 +8,6 @@
 ;
 ; Paths are relative to this file and assume the standard CMake build layout:
 ;   build/WishcraftMasteringLimiter_artefacts/Release/VST3/Wishcraft Mastering Limiter.vst3
-;   build/WishcraftMasteringLimiter_artefacts/Release/Standalone/Wishcraft Mastering Limiter.exe
 ;
 ; Unsigned for now (no code-signing certificate yet) -- Windows SmartScreen will warn
 ; on first run; users click "More info" -> "Run anyway". Add signtool steps once a
@@ -50,13 +49,12 @@ Source: "{#ArtefactsDir}\VST3\{#MyAppName}.vst3\*"; \
     DestDir: "{commoncf64}\VST3\{#MyAppName}.vst3"; \
     Flags: recursesubdirs createallsubdirs ignoreversion
 
-; Standalone app + manual, side by side in Program Files.
-Source: "{#ArtefactsDir}\Standalone\{#MyAppName}.exe"; DestDir: "{app}"; Flags: ignoreversion
+; No Standalone app -- not useful for this plugin (it's meant to run inside a DAW) --
+; so Program Files just holds the manual + uninstaller.
 Source: "..\..\Manual\Wishcraft_Mastering_Limiter_Manual.pdf"; DestDir: "{app}"; \
     DestName: "User Manual.pdf"; Flags: ignoreversion
 
 [Icons]
-Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppName}.exe"
 Name: "{group}\User Manual"; Filename: "{app}\User Manual.pdf"
 Name: "{group}\Uninstall {#MyAppName}"; Filename: "{uninstallexe}"
 

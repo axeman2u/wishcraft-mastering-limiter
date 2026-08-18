@@ -2,6 +2,13 @@ cmake_minimum_required(VERSION 3.22)
 
 project(WishcraftMasteringLimiter VERSION 1.0.0)
 
+# Xcode only builds for the machine's own architecture unless told otherwise -- without
+# this, a build done on an Apple Silicon Mac produces an arm64-only binary that won't
+# launch at all on an Intel Mac. Setting both archs makes it a universal binary.
+if(APPLE)
+    set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64" CACHE STRING "Build a universal (Apple Silicon + Intel) binary" FORCE)
+endif()
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -26,7 +33,7 @@ juce_add_plugin(WishcraftMasteringLimiter
     COMPANY_NAME "Wishcraft"
     PLUGIN_MANUFACTURER_CODE Wish
     PLUGIN_CODE Wml1
-    FORMATS AU VST3 Standalone
+    FORMATS AU VST3
     PRODUCT_NAME "Wishcraft Mastering Limiter"
     IS_SYNTH FALSE
     NEEDS_MIDI_INPUT FALSE

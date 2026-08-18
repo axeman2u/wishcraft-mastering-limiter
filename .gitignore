@@ -3,3 +3,5 @@ build/
 Packaging/macOS/work/
 Packaging/macOS/dist/
 dist/
+Packaging/Windows/*.zip
+Packaging/Windows/*.exe

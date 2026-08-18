@@ -1,13 +1,14 @@
 #!/bin/bash
 # Builds the macOS installer for Wishcraft Mastering Limiter: a .pkg that places the
-# VST3, AU, and Standalone app in their standard system locations (not a drag-and-drop
-# DMG the user has to place files from manually), wrapped in a DMG for distribution.
+# VST3 and AU (both universal Apple Silicon + Intel binaries) in their standard system
+# locations, plus the PDF manual in /Applications (not a drag-and-drop DMG the user has
+# to place files from manually), wrapped in a DMG for distribution.
 #
 # UNSIGNED for now (no Apple Developer ID yet) -- Gatekeeper will show an "unidentified
-# developer" warning on first launch; users need to right-click the app/installer and
-# choose Open, or approve it in System Settings > Privacy & Security. Once a Developer
-# ID is available, add `codesign` for the plugin bundles/app and `productsign` for the
-# .pkg before this script's productbuild step, then `xcrun notarytool submit` +
+# developer" warning on first launch; users need to right-click the installer and choose
+# Open, or approve it in System Settings > Privacy & Security. Once a Developer ID is
+# available, add `codesign` for the plugin bundles and `productsign` for the .pkg before
+# this script's productbuild step, then `xcrun notarytool submit` +
 # `xcrun stapler staple` on the finished .pkg.
 #
 # Usage: ./build_installer.sh [version]
@@ -44,8 +45,7 @@ fi
 
 for required in \
     "$ARTEFACTS/VST3/$APP_NAME.vst3" \
-    "$ARTEFACTS/AU/$APP_NAME.component" \
-    "$ARTEFACTS/Standalone/$APP_NAME.app"
+    "$ARTEFACTS/AU/$APP_NAME.component"
 do
     if [[ ! -e "$required" ]]; then
         echo "Missing build artefact: $required" >&2
@@ -58,22 +58,25 @@ done
 # ---------------------------------------------------------------------------
 echo "==> Staging install layout"
 rm -rf "$WORK_DIR" "$OUT_DIR"
-mkdir -p "$WORK_DIR/root-vst3" "$WORK_DIR/root-au" "$WORK_DIR/root-app/$APP_NAME" "$OUT_DIR"
+mkdir -p "$WORK_DIR/root-vst3" "$WORK_DIR/root-au" "$WORK_DIR/root-docs/$APP_NAME" "$OUT_DIR"
 
 cp -R "$ARTEFACTS/VST3/$APP_NAME.vst3" "$WORK_DIR/root-vst3/"
 cp -R "$ARTEFACTS/AU/$APP_NAME.component" "$WORK_DIR/root-au/"
-cp -R "$ARTEFACTS/Standalone/$APP_NAME.app" "$WORK_DIR/root-app/$APP_NAME/"
 
+# No Standalone app (not useful for this plugin -- it's meant to run inside a DAW), so
+# the manual gets its own small /Applications folder instead of riding along with an app
+# bundle. Keeps it somewhere users will actually find it, rather than the hidden system
+# plugin folders below.
 MANUAL_PDF="$PROJECT_ROOT/Manual/Wishcraft_Mastering_Limiter_Manual.pdf"
 if [[ -f "$MANUAL_PDF" ]]; then
-    cp "$MANUAL_PDF" "$WORK_DIR/root-app/$APP_NAME/"
+    cp "$MANUAL_PDF" "$WORK_DIR/root-docs/$APP_NAME/"
 else
     echo "Warning: manual PDF not found at $MANUAL_PDF -- installer will ship without it" >&2
 fi
 
 # cp -R leaves AppleDouble resource-fork sidecar files (._*) in the payload on some
 # filesystems -- harmless but sloppy for a real installer, strip them before packaging.
-find "$WORK_DIR/root-vst3" "$WORK_DIR/root-au" "$WORK_DIR/root-app" \
+find "$WORK_DIR/root-vst3" "$WORK_DIR/root-au" "$WORK_DIR/root-docs" \
     \( -name '._*' -o -name '.DS_Store' \) -delete
 
 # ---------------------------------------------------------------------------
@@ -94,11 +97,11 @@ pkgbuild --root "$WORK_DIR/root-au" \
          --install-location "/Library/Audio/Plug-Ins/Components" \
          "$WORK_DIR/pkgs/au.pkg" > /dev/null
 
-pkgbuild --root "$WORK_DIR/root-app" \
-         --identifier "$IDENTIFIER_PREFIX.app" \
+pkgbuild --root "$WORK_DIR/root-docs" \
+         --identifier "$IDENTIFIER_PREFIX.docs" \
          --version "$VERSION" \
          --install-location "/Applications" \
-         "$WORK_DIR/pkgs/app.pkg" > /dev/null
+         "$WORK_DIR/pkgs/docs.pkg" > /dev/null
 
 # ---------------------------------------------------------------------------
 # 4. Combine into one distribution package with a welcome/readme screen
@@ -109,11 +112,13 @@ This installs Wishcraft Mastering Limiter $VERSION:
 
   - VST3  -> /Library/Audio/Plug-Ins/VST3/
   - Audio Unit (AU)  -> /Library/Audio/Plug-Ins/Components/
-  - Standalone app + PDF manual -> /Applications/$APP_NAME/
+  - PDF manual -> /Applications/$APP_NAME/
+
+Both plugin formats are universal binaries (Apple Silicon + Intel).
 
 This installer is not yet code-signed. If macOS blocks it as being from an
-unidentified developer, right-click the installer (or the app) and choose
-Open, or allow it in System Settings > Privacy & Security.
+unidentified developer, right-click the installer and choose Open, or allow
+it in System Settings > Privacy & Security.
 EOF
 
 cat > "$WORK_DIR/license.txt" <<EOF
@@ -125,7 +130,7 @@ EOF
 productbuild --synthesize \
     --package "$WORK_DIR/pkgs/vst3.pkg" \
     --package "$WORK_DIR/pkgs/au.pkg" \
-    --package "$WORK_DIR/pkgs/app.pkg" \
+    --package "$WORK_DIR/pkgs/docs.pkg" \
     "$WORK_DIR/distribution.xml" > /dev/null
 
 # --synthesize only lists <pkg-ref>s; add the readable title/options productbuild needs
