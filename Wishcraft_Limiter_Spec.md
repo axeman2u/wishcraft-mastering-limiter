@@ -153,6 +153,49 @@ NOT turn these back into user-facing parameters:
   know where it lives — they open it from inside the plugin. Button is disabled with
   a tooltip if the file genuinely can't be found.
 
+## Trial Build
+Not part of the normal free/full release — a special build for handing out to beta
+testers, per explicit user request, to create real friction toward giving feedback.
+- Gated entirely behind `WISHCRAFT_TRIAL_BUILD` (CMake option, default OFF). The normal
+  Release build built and packaged by default never defines this, so
+  `Source/TrialLicense.h`'s check and `Source/GUI/TrialOverlay.h`'s blocking overlay
+  don't exist in that binary at all — this cannot leak into the real product by accident.
+- **Not hardened DRM** — proportionate friction for known beta testers, not a defense
+  against a determined attacker. Documented as such in TrialLicense.h; don't oversell its
+  robustness in any user-facing copy.
+- Installer-written marker file, not a compiled-in fixed date: `TRIAL=1
+  ./Packaging/macOS/build_installer.sh` (default `TRIAL_DAYS=30`, override via env var)
+  and `/DTRIAL=1` passed to `ISCC.exe` (also requires the CMake build itself configured
+  with `-DWISHCRAFT_TRIAL_BUILD=ON` — the .iss only packages, it doesn't build) each
+  write a tamper-evident marker file at install time, **only if one doesn't already
+  exist**:
+  - macOS: `/Library/Application Support/Wishcraft Mastering Limiter/.trial`, written by
+    a `postinstall` script attached to the VST3 component package (runs as root — this
+    project's macOS packaging has no uninstaller at all, so nothing removes it either).
+  - Windows: `%ProgramData%\Wishcraft Mastering Limiter\.trial`, written via a
+    PowerShell script invoked from the `[Code]` section's `CurStepChanged`. Written via
+    `Exec`, not a `[Files]` entry, so Inno's uninstaller has no record of it and won't
+    remove it.
+  - Content: `installDateISO\nhexHash`, where `hexHash = SHA256(secret + "|" +
+    installDateISO)`. The secret string is a fixed literal duplicated in three places —
+    `Source/TrialLicense.h`, the macOS `postinstall` script, and the Windows PowerShell
+    snippet — and **must be kept identical across all three** or every trial install
+    reads as tampered. Verified byte-for-byte hash agreement between bash's `shasum` and
+    JUCE's `SHA256` via an offline test during development.
+  - Missing, corrupt/tampered (hash mismatch), or backdated (system clock earlier than
+    the recorded install date) marker file all resolve to the SAME blocked state as a
+    genuinely expired trial — no distinct messaging that would hint at which check
+    tripped.
+- `PluginProcessor` checks trial status **once**, in the constructor (message thread,
+  not the audio thread) — `processBlock` only ever reads a cached atomic
+  (`trialBlocked`) and clears the buffer immediately if blocked, before touching
+  anything else.
+- GUI: a small always-visible "TRIAL — N days remaining" label near the title while
+  active; a non-dismissible full-canvas overlay (`TrialExpiredOverlay`) once blocked,
+  with an email button pre-addressed to wishcraftmusicstudio@gmail.com. The overlay is
+  purely explanatory — audio is already silenced independently in `processBlock`
+  regardless of whether the overlay is visible or even instantiated correctly.
+
 ## CPU Optimization (already in the JSFX — preserve the intent, not necessarily the exact trick)
 The current file conditionally computes the dry-path FIR downsampling only when needed
 (gained-dry FIR only during Delta, raw-dry FIR only during Bypass) while keeping buffers always

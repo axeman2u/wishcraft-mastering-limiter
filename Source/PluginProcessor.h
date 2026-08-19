@@ -1,5 +1,7 @@
 #pragma once
 
+#include <atomic>
+
 #include <juce_audio_processors/juce_audio_processors.h>
 
 #include "DSP/Limiter.h"
@@ -54,6 +56,14 @@ public:
     // and read-only access to Metering's atomics for the meter displays.
     juce::AudioProcessorValueTreeState& getAPVTS() noexcept { return apvts; }
     const Metering& getMetering() const noexcept { return metering; }
+
+   #if WISHCRAFT_TRIAL_BUILD
+    // For the editor: trial status, checked once at construction (see TrialLicense.h)
+    // and cached here so both the audio thread (processBlock) and the message thread
+    // (editor's timerCallback) can read it lock-free.
+    bool isTrialBlocked() const noexcept { return trialBlocked.load (std::memory_order_relaxed); }
+    int getTrialDaysRemaining() const noexcept { return trialDaysRemaining.load (std::memory_order_relaxed); }
+   #endif
 
 private:
     //==============================================================================
@@ -154,6 +164,13 @@ private:
     int currentOsChoiceIndex = -1; // forces a reconfigure on the first block
     double currentLookaheadMs = -1.0; // forces a reconfigure on the first block
     double currentSampleRate = 44100.0;
+
+   #if WISHCRAFT_TRIAL_BUILD
+    // Checked once in the constructor (see TrialLicense.h) -- processBlock only ever
+    // reads trialBlocked, never touches the filesystem itself.
+    std::atomic<bool> trialBlocked { true };
+    std::atomic<int> trialDaysRemaining { 0 };
+   #endif
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (WishcraftMasteringLimiterAudioProcessor)
 };

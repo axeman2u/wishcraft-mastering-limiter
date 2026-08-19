@@ -12,6 +12,15 @@ endif()
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# Trial build (OFF by default -- the normal Release build shipped via the real
+# installer never compiles in Source/TrialLicense.h's check at all, so it can't leak
+# into the actual free/full product). ON only for special builds handed to beta
+# testers -- see Packaging/macOS/build_installer.sh's TRIAL=1 mode and
+# Packaging/Windows/installer.iss's /DTRIAL=1 mode, which also write the installer-side
+# marker file this checks against.
+option(WISHCRAFT_TRIAL_BUILD "Build a time-limited trial version" OFF)
+set(WISHCRAFT_TRIAL_DAYS "30" CACHE STRING "Trial length in days (only used if WISHCRAFT_TRIAL_BUILD is ON)")
+
 # Pinned to the JUCE version this project was built against (9.0.1). Locally on the
 # original dev machine, reuse the existing checkout at /Users/glennburgos/JUCE instead
 # of re-cloning -- FETCHCONTENT_SOURCE_DIR_<name> is FetchContent's own override
@@ -53,11 +62,17 @@ target_compile_definitions(WishcraftMasteringLimiter
     PUBLIC
         JUCE_WEB_BROWSER=0
         JUCE_USE_CURL=0
-        JUCE_VST3_CAN_REPLACE_VST2=0)
+        JUCE_VST3_CAN_REPLACE_VST2=0
+        # Always defined as 0 or 1 (never just "defined/undefined"), matching JUCE's own
+        # JUCE_MAC/JUCE_WINDOWS convention, so source can safely use #if rather than
+        # #ifdef.
+        WISHCRAFT_TRIAL_BUILD=$<BOOL:${WISHCRAFT_TRIAL_BUILD}>
+        WISHCRAFT_TRIAL_DAYS=${WISHCRAFT_TRIAL_DAYS})
 
 target_link_libraries(WishcraftMasteringLimiter
     PRIVATE
         juce::juce_audio_utils
+        juce::juce_cryptography
     PUBLIC
         juce::juce_recommended_config_flags
         juce::juce_recommended_lto_flags

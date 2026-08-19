@@ -8,6 +8,7 @@
 #include "GUI/LookAndFeel/StudioConsoleLookAndFeel.h" // not applied here (see its own doc comment) -- included so it stays compiled/verified as part of the normal build
 #include "GUI/LookAndFeel/StudioConsoleTheme.h"
 #include "GUI/MeterColumns.h"
+#include "GUI/TrialOverlay.h" // no-op include in normal builds -- see its own WISHCRAFT_TRIAL_BUILD guard
 #include "GUI/WishcraftButton.h"
 #include "GUI/WishcraftHSlider.h"
 #include "GUI/WishcraftKnob.h"
@@ -100,6 +101,11 @@ private:
     SelectiveClipColumn selectiveClipColumn;
     GainReductionColumn gainReductionColumn;
     OutputColumn outputColumn;
+
+   #if WISHCRAFT_TRIAL_BUILD
+    juce::Label trialStatusLabel;
+    TrialExpiredOverlay trialOverlay;
+   #endif
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (WishcraftMasteringLimiterAudioProcessorEditor)
 };

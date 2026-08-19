@@ -1,4 +1,5 @@
 build/
+build-trial/
 .DS_Store
 Packaging/macOS/work/
 Packaging/macOS/dist/

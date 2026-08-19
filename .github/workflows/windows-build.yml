@@ -8,7 +8,16 @@ on:
   push:
     tags:
       - "v*"
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      trial:
+        description: "Build a time-limited TRIAL version (see Source/TrialLicense.h) instead of the normal release"
+        type: boolean
+        default: false
+      trial_days:
+        description: "Trial length in days (only used if trial is checked)"
+        type: string
+        default: "30"
 
 jobs:
   build-windows:
@@ -30,7 +39,15 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - name: Configure (CMake fetches JUCE 9.0.1 automatically -- see CMakeLists.txt)
-        run: cmake -B build -G "Visual Studio 17 2022" -A x64
+        shell: bash
+        run: |
+          if [ "${{ github.event.inputs.trial }}" = "true" ]; then
+            echo "==> TRIAL build: WISHCRAFT_TRIAL_BUILD=ON, ${{ github.event.inputs.trial_days }}-day trial"
+            cmake -B build -G "Visual Studio 17 2022" -A x64 \
+              -DWISHCRAFT_TRIAL_BUILD=ON -DWISHCRAFT_TRIAL_DAYS=${{ github.event.inputs.trial_days }}
+          else
+            cmake -B build -G "Visual Studio 17 2022" -A x64
+          fi
 
       - name: Build Release
         run: cmake --build build --config Release --parallel
@@ -39,14 +56,28 @@ jobs:
         run: choco install innosetup --no-progress -y
 
       - name: Build installer
-        shell: cmd
+        shell: bash
         run: |
-          "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DMyAppVersion=${{ steps.version.outputs.version }} "Packaging\Windows\installer.iss"
+          if [ "${{ github.event.inputs.trial }}" = "true" ]; then
+            "/c/Program Files (x86)/Inno Setup 6/ISCC.exe" /DMyAppVersion=${{ steps.version.outputs.version }} /DTRIAL=1 "Packaging/Windows/installer.iss"
+          else
+            "/c/Program Files (x86)/Inno Setup 6/ISCC.exe" /DMyAppVersion=${{ steps.version.outputs.version }} "Packaging/Windows/installer.iss"
+          fi
+
+      - name: Set artifact name
+        id: artifact_name
+        shell: bash
+        run: |
+          if [ "${{ github.event.inputs.trial }}" = "true" ]; then
+            echo "name=Wishcraft-Mastering-Limiter-Windows-Installer-TRIAL" >> "$GITHUB_OUTPUT"
+          else
+            echo "name=Wishcraft-Mastering-Limiter-Windows-Installer" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Upload installer artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Wishcraft-Mastering-Limiter-Windows-Installer
+          name: ${{ steps.artifact_name.outputs.name }}
           path: dist/*.exe
 
       - name: Attach to release

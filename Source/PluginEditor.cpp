@@ -26,6 +26,20 @@ WishcraftMasteringLimiterAudioProcessorEditor::WishcraftMasteringLimiterAudioPro
     helpOverlay.setBounds (0, 0, designW, designH);
     contentComponent.addChildComponent (helpOverlay);
 
+   #if WISHCRAFT_TRIAL_BUILD
+    trialStatusLabel.setFont (juce::FontOptions (9.0f));
+    trialStatusLabel.setColour (juce::Label::textColourId, StudioConsoleTheme::controlEndLabel);
+    trialStatusLabel.setJustificationType (juce::Justification::centred);
+    contentComponent.addAndMakeVisible (trialStatusLabel);
+
+    // Same addChildComponent()-not-addAndMakeVisible() reasoning as helpOverlay above --
+    // starts hidden, and timerCallback() decides each tick whether it should be shown,
+    // brought to front over even the help overlay if so.
+    trialOverlay.setBounds (0, 0, designW, designH);
+    contentComponent.addChildComponent (trialOverlay);
+    trialOverlay.setVisible (processorRef.isTrialBlocked());
+   #endif
+
     contentComponent.addAndMakeVisible (gainGroup);
     contentComponent.addAndMakeVisible (clipperGroup);
     contentComponent.addAndMakeVisible (sidechainGroup);
@@ -185,6 +199,11 @@ void WishcraftMasteringLimiterAudioProcessorEditor::layoutContent()
     helpButton.setBounds (designW - 34, 6, 24, 24);
     helpOverlay.setBounds (0, 0, designW, designH);
 
+   #if WISHCRAFT_TRIAL_BUILD
+    trialStatusLabel.setBounds (0, 36, designW, 8);
+    trialOverlay.setBounds (0, 0, designW, designH);
+   #endif
+
     // ---- Column 1 ----
     // SELECTIVE CLIPPER now sits above GAIN, matching both the actual signal path
     // (Selective Clipper -> Input Gain -> Limiter) and the real workflow: dial in the
@@ -280,4 +299,22 @@ void WishcraftMasteringLimiterAudioProcessorEditor::timerCallback()
     // the rest of the time, including when a host automates/loads listen_mode rather
     // than the user clicking deltaButton directly.
     deltaTrimKnob->setVisible (rangedParam ("listen_mode").getValue() > 0.5f);
+
+   #if WISHCRAFT_TRIAL_BUILD
+    if (processorRef.isTrialBlocked())
+    {
+        trialStatusLabel.setText ({}, juce::dontSendNotification);
+        // toFront() every tick while visible is cheap at 30Hz and guarantees this wins
+        // over the help overlay even if both happen to be open at once.
+        trialOverlay.setVisible (true);
+        trialOverlay.toFront (true);
+    }
+    else
+    {
+        trialOverlay.setVisible (false);
+        const int days = processorRef.getTrialDaysRemaining();
+        trialStatusLabel.setText ("TRIAL -- " + juce::String (days) + (days == 1 ? " day remaining" : " days remaining"),
+                                   juce::dontSendNotification);
+    }
+   #endif
 }

@@ -3,6 +3,7 @@
 #include <cmath>
 
 #include "PluginEditor.h"
+#include "TrialLicense.h"
 
 //==============================================================================
 WishcraftMasteringLimiterAudioProcessor::WishcraftMasteringLimiterAudioProcessor()
@@ -48,6 +49,16 @@ WishcraftMasteringLimiterAudioProcessor::WishcraftMasteringLimiterAudioProcessor
              && peakMeterRParam != nullptr && charMeterLParam != nullptr && charMeterRParam != nullptr
              && dynamicRangeParam != nullptr && lufsParam != nullptr && overYellowParam != nullptr
              && overRedParam != nullptr);
+
+   #if WISHCRAFT_TRIAL_BUILD
+    // Checked once here, not in processBlock -- see TrialLicense.h and this class's
+    // trialBlocked/trialDaysRemaining doc comments.
+    {
+        const auto status = TrialLicense::checkStatus();
+        trialBlocked.store (status.blocked, std::memory_order_relaxed);
+        trialDaysRemaining.store (status.daysRemaining, std::memory_order_relaxed);
+    }
+   #endif
 }
 
 // All 14 JSFX sliders, each matching its slider line's range/default exactly, plus the
@@ -406,6 +417,17 @@ void WishcraftMasteringLimiterAudioProcessor::processBlock (juce::AudioBuffer<fl
 {
     juce::ignoreUnused (midiMessages);
     juce::ScopedNoDenormals noDenormals;
+
+   #if WISHCRAFT_TRIAL_BUILD
+    // Trial period ended (or the license file is missing/tampered/backdated -- see
+    // TrialLicense.h) -- silence and bail before touching anything else. Cheap atomic
+    // read; the actual filesystem check only ever happens once, in the constructor.
+    if (trialBlocked.load (std::memory_order_relaxed))
+    {
+        buffer.clear();
+        return;
+    }
+   #endif
 
     const int osChoiceIndex = osChoiceParam->getIndex();
     const double lookaheadMs = (double) lookaheadParam->get();

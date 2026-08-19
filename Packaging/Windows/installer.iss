@@ -14,6 +14,15 @@
 ; Unsigned for now (no code-signing certificate yet) -- Windows SmartScreen will warn
 ; on first run; users click "More info" -> "Run anyway". Add signtool steps once a
 ; certificate is available.
+;
+; /DTRIAL=1 builds a time-limited trial version instead (see Source/TrialLicense.h and
+; Wishcraft_Limiter_Spec.md's "Trial Build" section) -- the CMake build it packages must
+; ALSO have been configured with -DWISHCRAFT_TRIAL_BUILD=ON (this script doesn't build
+; the plugin itself, only packages an already-built Release). Writes the same
+; tamper-evident marker file macOS's build_installer.sh's TRIAL=1 mode does, ONLY if one
+; doesn't already exist -- and since it's written via [Code]/Exec rather than a [Files]
+; entry, Inno's uninstaller has no record of it and won't remove it, so a user has to
+; find and delete it by hand before reinstalling resets anything.
 
 #ifndef MyAppVersion
   #define MyAppVersion "1.0.0"
@@ -21,6 +30,12 @@
 #define MyAppName "Wishcraft Mastering Limiter"
 #define MyAppPublisher "Glenn Burgos"
 #define ArtefactsDir "..\..\build\WishcraftMasteringLimiter_artefacts\Release"
+
+#ifdef TRIAL
+  #define OutputLabel "Wishcraft Mastering Limiter Setup " + MyAppVersion + " TRIAL"
+#else
+  #define OutputLabel "Wishcraft Mastering Limiter Setup " + MyAppVersion
+#endif
 
 [Setup]
 ; Fixed, arbitrary GUID identifying this app to Windows' installer/uninstaller registry
@@ -34,7 +49,7 @@ DefaultDirName={autopf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 OutputDir=..\..\dist
-OutputBaseFilename=Wishcraft Mastering Limiter Setup {#MyAppVersion}
+OutputBaseFilename={#OutputLabel}
 Compression=lzma
 SolidCompression=yes
 ArchitecturesAllowed=x64
@@ -63,3 +78,46 @@ Name: "{group}\Uninstall {#MyAppName}"; Filename: "{uninstallexe}"
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{commoncf64}\VST3\{#MyAppName}.vst3"
+
+#ifdef TRIAL
+[Code]
+// Writes the trial marker file Source/TrialLicense.h checks against, ONLY if one
+// doesn't already exist. The secret string here MUST exactly match
+// Source/TrialLicense.h's and Packaging/macOS/build_installer.sh's -- all three
+// compute the same salted hash over the same install-date string.
+procedure WriteTrialMarkerIfMissing;
+var
+  MarkerDir, MarkerFile, ScriptFile, ScriptContent: String;
+  ResultCode: Integer;
+begin
+  MarkerDir := ExpandConstant('{commonappdata}\Wishcraft Mastering Limiter');
+  MarkerFile := MarkerDir + '\.trial';
+  if FileExists(MarkerFile) then
+    Exit;
+  if not DirExists(MarkerDir) then
+    CreateDir(MarkerDir);
+
+  // Delegates the actual date/hash computation to PowerShell (via a temp .ps1 file,
+  // not an inline -Command string, to sidestep fragile nested-quoting) rather than
+  // reimplementing SHA256 in Pascal.
+  ScriptFile := ExpandConstant('{tmp}\wishcraft_trial_write.ps1');
+  ScriptContent :=
+    '$date = (Get-Date).ToString("yyyy-MM-dd")' + #13#10 +
+    '$secret = "Wishcraft-Trial-K7q2Zx9p"' + #13#10 +
+    '$sha = [System.Security.Cryptography.SHA256]::Create()' + #13#10 +
+    '$bytes = [System.Text.Encoding]::UTF8.GetBytes("$secret|$date")' + #13#10 +
+    '$hash = ([System.BitConverter]::ToString($sha.ComputeHash($bytes)) -replace "-","").ToLower()' + #13#10 +
+    '"$date`n$hash" | Out-File -Encoding ascii -NoNewline "' + MarkerFile + '"' + #13#10;
+
+  SaveStringToFile(ScriptFile, ScriptContent, False);
+  Exec('powershell.exe', '-NoProfile -ExecutionPolicy Bypass -File "' + ScriptFile + '"',
+       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  DeleteFile(ScriptFile);
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if CurStep = ssPostInstall then
+    WriteTrialMarkerIfMissing;
+end;
+#endif
