@@ -56,13 +56,18 @@ jobs:
         run: choco install innosetup --no-progress -y
 
       - name: Build installer
-        shell: bash
+        # cmd, not bash: git-bash/MSYS auto-mangles any argument starting with "/"
+        # (like /DTRIAL=1) into a Windows path before ISCC ever sees it, which is what
+        # broke this step the first time -- ISCC read the mangled path as a second
+        # script filename and refused to run ("You may not specify more than one script
+        # filename"). cmd has no such path-conversion behavior.
+        shell: cmd
         run: |
-          if [ "${{ github.event.inputs.trial }}" = "true" ]; then
-            "/c/Program Files (x86)/Inno Setup 6/ISCC.exe" /DMyAppVersion=${{ steps.version.outputs.version }} /DTRIAL=1 "Packaging/Windows/installer.iss"
-          else
-            "/c/Program Files (x86)/Inno Setup 6/ISCC.exe" /DMyAppVersion=${{ steps.version.outputs.version }} "Packaging/Windows/installer.iss"
-          fi
+          if "${{ github.event.inputs.trial }}"=="true" (
+            "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DMyAppVersion=${{ steps.version.outputs.version }} /DTRIAL=1 "Packaging\Windows\installer.iss"
+          ) else (
+            "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DMyAppVersion=${{ steps.version.outputs.version }} "Packaging\Windows\installer.iss"
+          )
 
       - name: Set artifact name
         id: artifact_name
