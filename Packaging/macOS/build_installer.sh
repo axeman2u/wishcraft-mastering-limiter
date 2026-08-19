@@ -81,7 +81,10 @@ done
 # 2. Stage the file layout each component package will install
 # ---------------------------------------------------------------------------
 echo "==> Staging install layout"
-rm -rf "$WORK_DIR" "$OUT_DIR"
+# Only wipe the scratch WORK_DIR, never OUT_DIR -- OUT_DIR is shared between normal and
+# TRIAL runs (both build into Packaging/macOS/dist/), so rm -rf'ing it here used to
+# delete whatever DMG a previous run (e.g. the normal build) had already placed there.
+rm -rf "$WORK_DIR"
 mkdir -p "$WORK_DIR/root-vst3" "$WORK_DIR/root-au" "$OUT_DIR"
 
 cp -R "$ARTEFACTS/VST3/$APP_NAME.vst3" "$WORK_DIR/root-vst3/"
@@ -144,7 +147,7 @@ pkgbuild --root "$WORK_DIR/root-vst3" \
          --identifier "$IDENTIFIER_PREFIX.vst3" \
          --version "$VERSION" \
          --install-location "/Library/Audio/Plug-Ins/VST3" \
-         "${VST3_PKGBUILD_ARGS[@]}" \
+         "${VST3_PKGBUILD_ARGS[@]+"${VST3_PKGBUILD_ARGS[@]}"}" \
          "$WORK_DIR/pkgs/vst3.pkg" > /dev/null
 
 pkgbuild --root "$WORK_DIR/root-au" \
