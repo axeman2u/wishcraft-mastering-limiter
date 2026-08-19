@@ -280,8 +280,8 @@ def build():
         ["Control", "Range", "Default", "What it does"],
         ["Threshold", "−24 to 0 dB", "−3.0 dB", "Level above which the clipper can act. Lower "
          "values let it engage on quieter peaks."],
-        ["Selectivity", "0–100%", "50%", "How aggressively the duration gate exempts brief "
-         "peaks. 0% = Transparent, 100% = Aggressive."],
+        ["Selectivity", "0–100%", "50%", "How much of the peaks above the threshold get "
+         "clipped. 0% = Transparent, 100% = Aggressive."],
         ["Delta", "On/Off", "Off", "Solos what the Selective Clipper is removing, gained "
          "up so it's audible. For dialing in Threshold and Selectivity by ear — turn "
          "off before rendering."],
@@ -315,7 +315,7 @@ def build():
     story.append(Paragraph("Limiter", styles["H2"]))
     story.append(control_table([
         ["Control", "Range", "Default", "What it does"],
-        ["Threshold", "−18 to 0 dB", "−1.0 dB", "The Limiter's gain-reduction target. "
+        ["Threshold", "−18 to 0 dB", "−0.1 dB", "The Limiter's gain-reduction target. "
          "A smoothed, program-dependent value the signal can transiently overshoot — "
          "not a hard-enforced ceiling. True-peak safety is the True Peak Limiter's job."],
         ["Lookahead", "0.5–20 ms", "3.0 ms", "How far ahead the Limiter looks to smooth "
@@ -325,7 +325,7 @@ def build():
          "a fast and a slow time constant depending on recent gain-reduction history."],
         ["Link", "0–100%", "75%", "Stereo linking of the two channels' gain reduction, "
          "blended after smoothing using min-gain-wins logic."],
-        ["TP Limit", "−3 to 0 dB", "−1.0 dB", "The True Peak Limiter's target ceiling "
+        ["TP Limit", "−3 to 0 dB", "−0.1 dB", "The True Peak Limiter's target ceiling "
          "— see “True Peak Accuracy” below for what this guarantee actually covers."],
         ["Auto Gain", "On/Off", "Off", "Keeps output level roughly matched regardless of "
          "gain reduction, for A/B'ing settings without a loudness bias. Strictly cut-"

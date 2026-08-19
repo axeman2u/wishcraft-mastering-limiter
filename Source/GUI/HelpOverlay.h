@@ -1,5 +1,6 @@
 #pragma once
 
+#include <juce_core/juce_core.h>
 #include <juce_gui_basics/juce_gui_basics.h>
 
 #include "LookAndFeel/StudioConsoleTheme.h"
@@ -7,6 +8,44 @@
 // Stage 11: Quick Start help. Net-new -- the JSFX has no equivalent -- so this is pure
 // UX addition, not a port. Kept deliberately lightweight: one scrollable panel, plain
 // styled text, no images or multi-step wizard.
+
+// The manual PDF ships installed alongside the plugin binaries themselves (see
+// Packaging/macOS/build_installer.sh and Packaging/Windows/installer.iss) rather than
+// in a separate, easy-to-forget location -- this searches the fixed system-wide
+// locations our own installers use, plus the equivalent per-user folders some users
+// prefer on macOS, so the "Manual (PDF)" button works regardless of which format
+// (VST3/AU) actually loaded.
+static inline juce::File findManualFile()
+{
+    const juce::String filename = "Wishcraft_Mastering_Limiter_Manual.pdf";
+
+   #if JUCE_MAC
+    const juce::StringArray systemDirs {
+        "/Library/Audio/Plug-Ins/VST3/",
+        "/Library/Audio/Plug-Ins/Components/",
+    };
+    for (auto& dir : systemDirs)
+    {
+        juce::File f (dir + filename);
+        if (f.existsAsFile())
+            return f;
+    }
+    auto home = juce::File::getSpecialLocation (juce::File::userHomeDirectory);
+    for (auto* sub : { "Library/Audio/Plug-Ins/VST3/", "Library/Audio/Plug-Ins/Components/" })
+    {
+        auto f = home.getChildFile (juce::String (sub) + filename);
+        if (f.existsAsFile())
+            return f;
+    }
+   #elif JUCE_WINDOWS
+    const auto programFiles = juce::SystemStats::getEnvironmentVariable ("ProgramFiles", "C:\\Program Files");
+    juce::File f (programFiles + "\\Common Files\\VST3\\" + filename);
+    if (f.existsAsFile())
+        return f;
+   #endif
+
+    return {};
+}
 
 // Renders the Quick Start copy as a single AttributedString (headers bold/accent,
 // body regular, tips indented) and reports the height it needs for a given width, so
@@ -146,6 +185,21 @@ public:
         closeButton.onClick = [this] { setVisible (false); };
         addAndMakeVisible (closeButton);
 
+        manualButton.setButtonText ("Manual (PDF)");
+        manualButton.setColour (juce::TextButton::buttonColourId, StudioConsoleTheme::buttonOff);
+        manualButton.setColour (juce::TextButton::textColourOffId, StudioConsoleTheme::controlValueText);
+        manualFile = findManualFile();
+        if (manualFile.existsAsFile())
+        {
+            manualButton.onClick = [this] { manualFile.startAsProcess(); };
+        }
+        else
+        {
+            manualButton.setEnabled (false);
+            manualButton.setTooltip ("Manual not found -- expected installed alongside the plugin.");
+        }
+        addAndMakeVisible (manualButton);
+
         viewport.setViewedComponent (&content, false);
         viewport.setScrollBarsShown (true, false);
         addAndMakeVisible (viewport);
@@ -160,6 +214,8 @@ public:
         auto panel = panelBounds.reduced (16);
         auto header = panel.removeFromTop (28);
         closeButton.setBounds (header.removeFromRight (24).withSizeKeepingCentre (24, 24));
+        header.removeFromRight (8);
+        manualButton.setBounds (header.removeFromRight (110).reduced (0, 2));
         titleLabel.setBounds (header);
         panel.removeFromTop (8);
 
@@ -194,6 +250,8 @@ public:
 private:
     juce::Label titleLabel;
     juce::TextButton closeButton;
+    juce::TextButton manualButton;
+    juce::File manualFile;
     juce::Viewport viewport;
     HelpContentComponent content;
     juce::Rectangle<int> panelBounds;

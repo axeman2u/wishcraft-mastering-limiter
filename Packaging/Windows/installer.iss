@@ -1,6 +1,8 @@
 ; Inno Setup script for Wishcraft Mastering Limiter. Builds a proper installer that
-; places the VST3 in the standard system-wide VST3 folder and the manual in Program
-; Files -- not a zip the user has to place files from manually.
+; places the VST3 in the standard system-wide VST3 folder, with a copy of the manual
+; alongside it (also findable from within the plugin itself via its Help overlay's
+; "Manual (PDF)" button -- see Source/GUI/HelpOverlay.h's findManualFile()) -- not a
+; zip the user has to place files from manually.
 ;
 ; MyAppVersion defaults below but is normally overridden from CI via
 ; "iscc /DMyAppVersion=1.2.3 installer.iss" so the installer's version always matches
@@ -49,13 +51,14 @@ Source: "{#ArtefactsDir}\VST3\{#MyAppName}.vst3\*"; \
     DestDir: "{commoncf64}\VST3\{#MyAppName}.vst3"; \
     Flags: recursesubdirs createallsubdirs ignoreversion
 
-; No Standalone app -- not useful for this plugin (it's meant to run inside a DAW) --
-; so Program Files just holds the manual + uninstaller.
-Source: "..\..\Manual\Wishcraft_Mastering_Limiter_Manual.pdf"; DestDir: "{app}"; \
-    DestName: "User Manual.pdf"; Flags: ignoreversion
+; Manual, alongside the VST3 in the same shared folder (not Program Files) so it's
+; right next to the plugin file itself -- matches findManualFile()'s Windows candidate
+; path exactly. Filename is NOT renamed, for the same reason.
+Source: "..\..\Manual\Wishcraft_Mastering_Limiter_Manual.pdf"; \
+    DestDir: "{commoncf64}\VST3"; Flags: ignoreversion
 
 [Icons]
-Name: "{group}\User Manual"; Filename: "{app}\User Manual.pdf"
+Name: "{group}\User Manual"; Filename: "{commoncf64}\VST3\Wishcraft_Mastering_Limiter_Manual.pdf"
 Name: "{group}\Uninstall {#MyAppName}"; Filename: "{uninstallexe}"
 
 [UninstallDelete]

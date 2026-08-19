@@ -1,8 +1,8 @@
 #!/bin/bash
 # Builds the macOS installer for Wishcraft Mastering Limiter: a .pkg that places the
 # VST3 and AU (both universal Apple Silicon + Intel binaries) in their standard system
-# locations, plus the PDF manual in /Applications (not a drag-and-drop DMG the user has
-# to place files from manually), wrapped in a DMG for distribution.
+# locations, plus a copy of the PDF manual alongside each (not a drag-and-drop DMG the
+# user has to place files from manually), wrapped in a DMG for distribution.
 #
 # UNSIGNED for now (no Apple Developer ID yet) -- Gatekeeper will show an "unidentified
 # developer" warning on first launch; users need to right-click the installer and choose
@@ -58,25 +58,26 @@ done
 # ---------------------------------------------------------------------------
 echo "==> Staging install layout"
 rm -rf "$WORK_DIR" "$OUT_DIR"
-mkdir -p "$WORK_DIR/root-vst3" "$WORK_DIR/root-au" "$WORK_DIR/root-docs/$APP_NAME" "$OUT_DIR"
+mkdir -p "$WORK_DIR/root-vst3" "$WORK_DIR/root-au" "$OUT_DIR"
 
 cp -R "$ARTEFACTS/VST3/$APP_NAME.vst3" "$WORK_DIR/root-vst3/"
 cp -R "$ARTEFACTS/AU/$APP_NAME.component" "$WORK_DIR/root-au/"
 
-# No Standalone app (not useful for this plugin -- it's meant to run inside a DAW), so
-# the manual gets its own small /Applications folder instead of riding along with an app
-# bundle. Keeps it somewhere users will actually find it, rather than the hidden system
-# plugin folders below.
+# A loose PDF alongside the .vst3/.component bundles doesn't confuse any host (they scan
+# by bundle extension, not folder contents) -- and the plugin's own Help overlay has a
+# "Manual (PDF)" button (Source/GUI/HelpOverlay.h's findManualFile()) that looks for it
+# at exactly this path, so users never need to remember where it lives.
 MANUAL_PDF="$PROJECT_ROOT/Manual/Wishcraft_Mastering_Limiter_Manual.pdf"
 if [[ -f "$MANUAL_PDF" ]]; then
-    cp "$MANUAL_PDF" "$WORK_DIR/root-docs/$APP_NAME/"
+    cp "$MANUAL_PDF" "$WORK_DIR/root-vst3/"
+    cp "$MANUAL_PDF" "$WORK_DIR/root-au/"
 else
     echo "Warning: manual PDF not found at $MANUAL_PDF -- installer will ship without it" >&2
 fi
 
 # cp -R leaves AppleDouble resource-fork sidecar files (._*) in the payload on some
 # filesystems -- harmless but sloppy for a real installer, strip them before packaging.
-find "$WORK_DIR/root-vst3" "$WORK_DIR/root-au" "$WORK_DIR/root-docs" \
+find "$WORK_DIR/root-vst3" "$WORK_DIR/root-au" \
     \( -name '._*' -o -name '.DS_Store' \) -delete
 
 # ---------------------------------------------------------------------------
@@ -97,12 +98,6 @@ pkgbuild --root "$WORK_DIR/root-au" \
          --install-location "/Library/Audio/Plug-Ins/Components" \
          "$WORK_DIR/pkgs/au.pkg" > /dev/null
 
-pkgbuild --root "$WORK_DIR/root-docs" \
-         --identifier "$IDENTIFIER_PREFIX.docs" \
-         --version "$VERSION" \
-         --install-location "/Applications" \
-         "$WORK_DIR/pkgs/docs.pkg" > /dev/null
-
 # ---------------------------------------------------------------------------
 # 4. Combine into one distribution package with a welcome/readme screen
 # ---------------------------------------------------------------------------
@@ -110,11 +105,12 @@ echo "==> Building distribution package"
 cat > "$WORK_DIR/welcome.txt" <<EOF
 This installs Wishcraft Mastering Limiter $VERSION:
 
-  - VST3  -> /Library/Audio/Plug-Ins/VST3/
-  - Audio Unit (AU)  -> /Library/Audio/Plug-Ins/Components/
-  - PDF manual -> /Applications/$APP_NAME/
+  - VST3 + PDF manual  -> /Library/Audio/Plug-Ins/VST3/
+  - Audio Unit (AU) + PDF manual  -> /Library/Audio/Plug-Ins/Components/
 
-Both plugin formats are universal binaries (Apple Silicon + Intel).
+Both plugin formats are universal binaries (Apple Silicon + Intel). Open the
+manual any time from within the plugin itself via the "?" button, then
+"Manual (PDF)".
 
 This installer is not yet code-signed. If macOS blocks it as being from an
 unidentified developer, right-click the installer and choose Open, or allow
@@ -130,7 +126,6 @@ EOF
 productbuild --synthesize \
     --package "$WORK_DIR/pkgs/vst3.pkg" \
     --package "$WORK_DIR/pkgs/au.pkg" \
-    --package "$WORK_DIR/pkgs/docs.pkg" \
     "$WORK_DIR/distribution.xml" > /dev/null
 
 # --synthesize only lists <pkg-ref>s; add the readable title/options productbuild needs

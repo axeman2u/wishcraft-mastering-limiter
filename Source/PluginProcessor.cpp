@@ -108,12 +108,15 @@ juce::AudioProcessorValueTreeState::ParameterLayout WishcraftMasteringLimiterAud
     // JSFX slider5:ceiling_db=-1<-18,0,0.01>-Limiter Ceiling (dB) -- displayed as
     // "Threshold" (param ID kept as ceiling_db for automation/state compatibility): a
     // smoothed target the signal can transiently overshoot, not a hard ceiling -- see
-    // PluginProcessor.h's ceilingParam comment.
+    // PluginProcessor.h's ceilingParam comment. Default changed from the JSFX's -1.0 dB
+    // to -0.1 dB per user testing across varying-density/dynamic-range material,
+    // rendering true peak consistently between -1 and -0.5 dBTP alongside TP Limit's
+    // matching -0.1 dB default below.
     layout.add (std::make_unique<juce::AudioParameterFloat> (
         juce::ParameterID { "ceiling_db", 1 },
         "Threshold",
         juce::NormalisableRange<float> (-18.0f, 0.0f, 0.01f),
-        -1.0f));
+        -0.1f));
 
     // JSFX slider6:lookahead_ms=3<0.5,20,0.1>-Limiter Lookahead (ms). A change is
     // treated exactly like an os_choice change (full reconfigure/state reset, see
@@ -142,11 +145,13 @@ juce::AudioProcessorValueTreeState::ParameterLayout WishcraftMasteringLimiterAud
     // JSFX slider9:output_ceiling_db=-1<-3,0,0.01>-True Peak Output Ceiling -- displayed
     // as "TP Limit": drives TruePeakLimiter's target ceiling (smooth gain reduction,
     // genuinely true-peak-aware -- see TruePeakLimiter.h), adjustable up to 0.0 dB.
+    // Default changed from the JSFX's -1.0 dB to -0.1 dB per user testing (see
+    // ceilingParam's matching default change above).
     layout.add (std::make_unique<juce::AudioParameterFloat> (
         juce::ParameterID { "output_ceiling_db", 1 },
         "TP Limit",
         juce::NormalisableRange<float> (-3.0f, 0.0f, 0.01f),
-        -1.0f));
+        -0.1f));
 
     // JSFX slider10:link_pct=75<0,100,0.1>-Stereo Link
     layout.add (std::make_unique<juce::AudioParameterFloat> (

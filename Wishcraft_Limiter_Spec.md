@@ -42,6 +42,9 @@ NOT turn these back into user-facing parameters:
   automation/state compatibility) — it's a smoothed target the signal can transiently
   overshoot, not a hard-enforced ceiling. True-peak safety is the True Peak Limiter's job,
   not this control's.
+- Default **-0.1 dB** (changed from the JSFX's -1.0 dB), matching TP Limit's default
+  below — per user testing across varying-density/dynamic-range material, this pairing
+  rendered true peak consistently between -1 and -0.5 dBTP.
 - Limiter Auto Gain: **user-toggleable** (unlike Selective Clipper's Auto Gain), **strictly
   cut-only** — fixed 0.0 dB cap, decoupled from any peak-ceiling formula. It must never
   restore level above unity, the way a compressor's makeup gain might.
@@ -61,7 +64,8 @@ NOT turn these back into user-facing parameters:
 - Fixed internal lookahead/attack/release, not user-exposed (the Limiter's own
   Threshold/Release/Link already cover the musical/creative case)
 - Targets the **TP Limit** control (`output_ceiling_db`, the repurposed former "Out
-  Ceiling"/"Peak Ceiling" knob), adjustable up to 0.0 dB
+  Ceiling"/"Peak Ceiling" knob), adjustable up to 0.0 dB. Default **-0.1 dB** (changed
+  from the JSFX's -1.0 dB) — see Limiter Core's matching Threshold default note above
 - Includes a small **internal** reconstruction-margin constant (`reconstructionMarginDb`,
   0.6 dB — not user-facing) so residual detection error can't push the final
   reconstructed peak past the displayed TP Limit value on realistic content
@@ -136,6 +140,18 @@ NOT turn these back into user-facing parameters:
   the True Peak Limiter's genuine true-peak guarantee, not a name earlier stages
   couldn't back up. Do not resurrect "Peak Ceiling" or "Out Ceiling" as this control's
   GUI label.
+
+## Manual (PDF) Distribution
+- The installer copies the manual PDF directly alongside the plugin binaries themselves
+  (macOS: `/Library/Audio/Plug-Ins/VST3/` and `.../Components/`; Windows: the shared
+  `Common Files\VST3\` folder next to the .vst3) — NOT to a separate /Applications
+  folder or Program Files subfolder a user has to remember. See
+  Packaging/macOS/build_installer.sh and Packaging/Windows/installer.iss.
+- The Help overlay's **"Manual (PDF)"** button (`Source/GUI/HelpOverlay.h`'s
+  `findManualFile()`) locates it at runtime by checking those same fixed install
+  locations (plus the equivalent per-user folders on macOS), so users never need to
+  know where it lives — they open it from inside the plugin. Button is disabled with
+  a tooltip if the file genuinely can't be found.
 
 ## CPU Optimization (already in the JSFX — preserve the intent, not necessarily the exact trick)
 The current file conditionally computes the dry-path FIR downsampling only when needed
