@@ -115,6 +115,12 @@ WishcraftMasteringLimiterAudioProcessorEditor::WishcraftMasteringLimiterAudioPro
         rangedParam ("limiter_auto_gain"), "Auto Gain", StudioConsoleTheme::accentAmber);
     contentComponent.addAndMakeVisible (*autoGainButton);
 
+    oversamplingLabel.setText ("Oversampling", juce::dontSendNotification);
+    oversamplingLabel.setFont (juce::FontOptions (13.0f));
+    oversamplingLabel.setColour (juce::Label::textColourId, StudioConsoleTheme::controlLabel);
+    oversamplingLabel.setJustificationType (juce::Justification::centred);
+    contentComponent.addAndMakeVisible (oversamplingLabel);
+
     osChoiceRadio = std::make_unique<WishcraftRadioGroup> (
         rangedParam ("os_choice"), juce::StringArray { "2x", "4x", "8x" }, StudioConsoleTheme::accentBlue);
     contentComponent.addAndMakeVisible (*osChoiceRadio);
@@ -270,6 +276,8 @@ void WishcraftMasteringLimiterAudioProcessorEditor::layoutContent()
     utilityGroup.setBounds (c2X, utlY, c2W, utlH);
     {
         auto interior = utilityGroup.getBounds().withTrimmedTop (headerH).reduced (4, 2);
+        oversamplingLabel.setBounds (interior.removeFromTop (18));
+        interior.removeFromTop (2);
         auto row1 = interior.removeFromTop (22);
         osChoiceRadio->setBounds (juce::Rectangle<int> (210, 22).withCentre (row1.getCentre()));
         interior.removeFromTop (8);

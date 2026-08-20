@@ -94,6 +94,10 @@ private:
     std::unique_ptr<WishcraftKnob> linkKnob;
     std::unique_ptr<WishcraftKnob> outputCeilingKnob;
     std::unique_ptr<WishcraftButton> autoGainButton;
+    // Unlike WishcraftKnob/WishcraftHSlider, WishcraftRadioGroup has no built-in name
+    // label of its own (its segments just show "2x"/"4x"/"8x") -- this stands in for
+    // one, since nothing else in UTILITY said what those numbers actually control.
+    juce::Label oversamplingLabel;
     std::unique_ptr<WishcraftRadioGroup> osChoiceRadio;
     std::unique_ptr<WishcraftButton> bypassButton;
 
