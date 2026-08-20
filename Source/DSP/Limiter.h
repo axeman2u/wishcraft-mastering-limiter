@@ -237,12 +237,20 @@ public:
         if (gainMatchOn)
         {
             // Targets TP Limit (outputCeilingSmoothed), not the raw dry/source signal --
-            // see this class's top-of-file doc comment for why. +/-24dB comfortably
-            // covers the gap between a barely-processed signal and a hard-limited one
-            // without letting a pathological setting blow up the correction.
+            // see this class's top-of-file doc comment for why. Asymmetric range: -24dB
+            // of cut is safe (just makes an over-hot signal quieter), but the boost side
+            // is deliberately conservative (+6dB, not the +24dB first tried) because
+            // fullGainPeakChar starts at (and can decay back to, after any quiet passage)
+            // 0.0 while targetLin is a fixed nonzero value from sample one -- during the
+            // ~5ms attack ramp before fullGainPeakChar catches up to the true signal
+            // level, target/tinyPeakChar briefly computes a huge ratio. A wide boost
+            // clamp let that transient through as an audible, distorted-sounding spike
+            // (confirmed via an offline peak/RMS test: with +24dB allowed, a steady tone
+            // produced peak=15.68 in the first 50ms before settling to a sane ~1.0);
+            // +6dB bounds the same transient to something mild.
             const double targetLin = std::pow (10.0, outputCeilingSmoothed / 20.0);
-            outL = applyGainMatch (left.fullGainPeakChar,  targetLin, limL, makeupAttackCoeff, makeupReleaseCoeff, -24.0, 24.0);
-            outR = applyGainMatch (right.fullGainPeakChar, targetLin, limR, makeupAttackCoeff, makeupReleaseCoeff, -24.0, 24.0);
+            outL = applyGainMatch (left.fullGainPeakChar,  targetLin, limL, makeupAttackCoeff, makeupReleaseCoeff, -24.0, 6.0);
+            outR = applyGainMatch (right.fullGainPeakChar, targetLin, limR, makeupAttackCoeff, makeupReleaseCoeff, -24.0, 6.0);
         }
         else
         {

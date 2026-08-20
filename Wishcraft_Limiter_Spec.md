@@ -53,10 +53,20 @@ NOT turn these back into user-facing parameters:
   driven, limited "mastered" result, so engaging it dropped output well below the user's
   actual monitoring level, forcing a volume-knob round-trip on every A/B (reported by
   the user, who owns and drives this decision). **Now targets TP Limit**
-  (`output_ceiling_db`'s smoothed value) instead, and can both cut AND boost toward it
-  (±24 dB range) — see `Source/DSP/PeakFollowerMakeup.h`'s `applyGainMatch()` and
-  `Source/DSP/Limiter.h`'s class-level doc comment. This keeps different Threshold
-  settings loudness-matched to each other (preserving the original "fair A/B, no
+  (`output_ceiling_db`'s smoothed value) instead, and can both cut AND boost toward it —
+  **asymmetric range, -24dB cut / +6dB boost, NOT ±24dB**. The boost side must stay
+  conservative: `applyGainMatch`'s peak-follower starts at (and decays back to, after any
+  quiet passage) 0.0 while the target is a fixed nonzero value from sample one, so during
+  the ~5ms attack ramp before the follower catches up, target/tinyPeak briefly computes a
+  huge ratio. A wide boost clamp lets that transient through as an audible, distorted-
+  sounding spike (confirmed via an offline peak/RMS test that reproduced a real user-
+  reported "sounds distorted, like signal and delta combined" bug: with +24dB allowed, a
+  steady tone spiked to peak=15.68 in the first 50ms before settling to a sane ~1.0; with
+  +6dB, the same transient tops out at a mild ~2.0). Do not widen the boost side back
+  toward symmetry without addressing the underlying ramp-up asymmetry first. See
+  `Source/DSP/PeakFollowerMakeup.h`'s `applyGainMatch()` and `Source/DSP/Limiter.h`'s
+  class-level doc comment. This keeps different Threshold settings loudness-matched to
+  each other (preserving the original "fair A/B, no
   louder-sounds-better bias" purpose) while keeping Gain Match on/off close to the
   user's monitoring level regardless of state.
 - Stereo Link: blended **after** smoothing, using **min-gain-wins** logic
