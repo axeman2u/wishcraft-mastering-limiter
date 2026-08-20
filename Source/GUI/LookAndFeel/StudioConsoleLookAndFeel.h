@@ -33,7 +33,7 @@ public:
 
     // Accent used for anything drawn "on"/active (toggle buttons, radio segments) when
     // the widget doesn't otherwise specify a colour -- defaults to the amber family
-    // this plugin uses for Auto Gain/Bypass/Delta. Call setAccent() for the blue family
+    // this plugin uses for Gain Match/Bypass/Delta. Call setAccent() for the blue family
     // (this plugin's OS-factor radio group) on a per-instance basis if a future project
     // wants both accents available without two LookAndFeel instances.
     void setAccent (juce::Colour newAccent) { accent = newAccent; }

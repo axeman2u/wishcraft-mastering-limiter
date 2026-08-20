@@ -102,15 +102,19 @@ private:
     juce::AudioParameterFloat* inputGainParam = nullptr;
     // JSFX slider9: output_ceiling_db -- displayed as "TP Limit". Drives the True Peak
     // Limiter's target ceiling (Source/DSP/TruePeakLimiter.h), which does the real
-    // true-peak-safety work via smooth gain reduction. No longer caps Limiter Auto Gain
-    // (fixed at 0.0 dB now, strictly cut-only) or feeds Safety Clip (a fixed 0.0 dBFS
-    // backstop now, fully decoupled from this parameter).
+    // true-peak-safety work via smooth gain reduction; also Gain Match's target (see
+    // gainMatchParam below) -- no longer feeds Safety Clip (a fixed 0.0 dBFS backstop
+    // now, fully decoupled from this parameter).
     juce::AudioParameterFloat* outputCeilingParam = nullptr;
     // JSFX slider10: link_pct -- Stereo Link.
     juce::AudioParameterFloat* linkParam = nullptr;
-    // JSFX slider14: limiter_auto_gain -- Limiter Auto Gain (user-toggleable, unlike
-    // the Selective Clipper's permanently-on Auto Makeup Gain).
-    juce::AudioParameterBool* limiterAutoGainParam = nullptr;
+    // JSFX slider14: limiter_auto_gain -- displayed as "Gain Match" (renamed from
+    // "Auto Gain" per explicit user request; param ID kept for automation/state
+    // compatibility). User-toggleable, unlike the Selective Clipper's permanently-on
+    // Auto Makeup Gain. Gain-matches the processed signal toward outputCeilingParam's
+    // smoothed value (TP Limit) rather than the raw pre-processing source -- see
+    // Limiter.h's class-level doc comment for why.
+    juce::AudioParameterBool* gainMatchParam = nullptr;
     // JSFX slider11/12: sc_low_shelf_db/sc_high_shelf_db -- Sidechain EQ. Feeds two
     // separate filter instances (Selective Clipper's detector, Limiter's detector/audio
     // path); see Limiter.h for why the Limiter's isn't strictly detector-only.

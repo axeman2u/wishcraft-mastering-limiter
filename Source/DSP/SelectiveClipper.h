@@ -109,10 +109,10 @@ public:
     // One oversampled tick for both channels: sidechain-filtered detection -> duration-
     // gated clip -> delay-matched dry reference -> Auto Makeup Gain. Matches the JSFX's
     // per-tick Character block exactly, including the shared wposChar advance. dryL/dryR
-    // are also returned -- the Limiter's own (user-toggleable) Auto Gain uses this same
-    // dry reference directly as its peak-ratio comparison point, matching the JSFX using
-    // dry_L/dry_R rather than a further-delayed copy. charL/charR (pre-makeup-gain,
-    // post-clip) are ALSO returned -- the Character Activity meter needs this exact
+    // are also returned -- used downstream in Limiter.h for Bypass's raw-dry reference
+    // and Delta's gained-dry reference (no longer the Limiter's own Gain Match
+    // comparison point -- that now targets TP Limit instead, see Limiter.h). charL/charR
+    // (pre-makeup-gain, post-clip) are ALSO returned -- the Character Activity meter needs this exact
     // pair, not outL/outR: Auto Makeup Gain restores level so effectively that comparing
     // its output to dry understates how much clipping actually happened (matches the
     // JSFX using dry_L/char_L for this, not makeup_L).

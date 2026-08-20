@@ -21,7 +21,7 @@ WishcraftMasteringLimiterAudioProcessor::WishcraftMasteringLimiterAudioProcessor
     inputGainParam       = dynamic_cast<juce::AudioParameterFloat*>  (apvts.getParameter ("input_gain_db"));
     outputCeilingParam   = dynamic_cast<juce::AudioParameterFloat*>  (apvts.getParameter ("output_ceiling_db"));
     linkParam            = dynamic_cast<juce::AudioParameterFloat*>  (apvts.getParameter ("link_pct"));
-    limiterAutoGainParam = dynamic_cast<juce::AudioParameterBool*>   (apvts.getParameter ("limiter_auto_gain"));
+    gainMatchParam       = dynamic_cast<juce::AudioParameterBool*>   (apvts.getParameter ("limiter_auto_gain"));
     scLowShelfParam      = dynamic_cast<juce::AudioParameterFloat*>  (apvts.getParameter ("sc_low_shelf_db"));
     scHighShelfParam     = dynamic_cast<juce::AudioParameterFloat*>  (apvts.getParameter ("sc_high_shelf_db"));
     bypassParam          = dynamic_cast<juce::AudioParameterBool*>   (apvts.getParameter ("bypass"));
@@ -42,7 +42,7 @@ WishcraftMasteringLimiterAudioProcessor::WishcraftMasteringLimiterAudioProcessor
     jassert (osChoiceParam != nullptr && thresholdParam != nullptr && selectivityParam != nullptr
              && ceilingParam != nullptr && releaseParam != nullptr && lookaheadParam != nullptr
              && inputGainParam != nullptr
-             && outputCeilingParam != nullptr && linkParam != nullptr && limiterAutoGainParam != nullptr
+             && outputCeilingParam != nullptr && linkParam != nullptr && gainMatchParam != nullptr
              && scLowShelfParam != nullptr && scHighShelfParam != nullptr && bypassParam != nullptr
              && listenModeParam != nullptr && deltaTrimParam != nullptr
              && grMeterLParam != nullptr && grMeterRParam != nullptr && peakMeterLParam != nullptr
@@ -191,10 +191,13 @@ juce::AudioProcessorValueTreeState::ParameterLayout WishcraftMasteringLimiterAud
         "Bypass",
         false));
 
-    // JSFX slider14:limiter_auto_gain=0<0,1,1{Off,On}>-Limiter Auto Gain
+    // JSFX slider14:limiter_auto_gain=0<0,1,1{Off,On}>-Limiter Auto Gain -- displayed as
+    // "Gain Match" (renamed per explicit user request; param ID kept for automation/
+    // state compatibility). Now gain-matches toward TP Limit rather than the raw
+    // pre-processing source -- see Limiter.h's class-level doc comment for why.
     layout.add (std::make_unique<juce::AudioParameterBool> (
         juce::ParameterID { "limiter_auto_gain", 1 },
-        "Limiter Auto Gain",
+        "Gain Match",
         false));
 
     // TEMPORARY debug readouts, updated once per block. Marked non-automatable since
@@ -455,7 +458,7 @@ void WishcraftMasteringLimiterAudioProcessor::processBlock (juce::AudioBuffer<fl
                                 (double) linkParam->get(),
                                 (double) inputGainParam->get(),
                                 (double) outputCeilingParam->get(),
-                                limiterAutoGainParam->get(),
+                                gainMatchParam->get(),
                                 scLowShelfDb, scHighShelfDb);
         // TruePeakLimiter's target is derived from the same output_ceiling_smoothed the
         // Limiter just updated above -- pulled from there rather than re-smoothed here.

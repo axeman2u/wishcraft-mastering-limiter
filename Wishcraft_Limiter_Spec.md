@@ -45,9 +45,20 @@ NOT turn these back into user-facing parameters:
 - Default **-0.1 dB** (changed from the JSFX's -1.0 dB), matching TP Limit's default
   below — per user testing across varying-density/dynamic-range material, this pairing
   rendered true peak consistently between -1 and -0.5 dBTP.
-- Limiter Auto Gain: **user-toggleable** (unlike Selective Clipper's Auto Gain), **strictly
-  cut-only** — fixed 0.0 dB cap, decoupled from any peak-ceiling formula. It must never
-  restore level above unity, the way a compressor's makeup gain might.
+- **Gain Match** (JSFX slider14 `limiter_auto_gain`, displayed name changed from "Auto
+  Gain" — param ID unchanged for automation/state compatibility — per explicit user
+  request): **user-toggleable** (unlike Selective Clipper's own Auto Makeup Gain, which
+  stays permanently on). Was strictly cut-only, targeting unity relative to the raw
+  pre-processing dry/source signal — but that source is typically much quieter than a
+  driven, limited "mastered" result, so engaging it dropped output well below the user's
+  actual monitoring level, forcing a volume-knob round-trip on every A/B (reported by
+  the user, who owns and drives this decision). **Now targets TP Limit**
+  (`output_ceiling_db`'s smoothed value) instead, and can both cut AND boost toward it
+  (±24 dB range) — see `Source/DSP/PeakFollowerMakeup.h`'s `applyGainMatch()` and
+  `Source/DSP/Limiter.h`'s class-level doc comment. This keeps different Threshold
+  settings loudness-matched to each other (preserving the original "fair A/B, no
+  louder-sounds-better bias" purpose) while keeping Gain Match on/off close to the
+  user's monitoring level regardless of state.
 - Stereo Link: blended **after** smoothing, using **min-gain-wins** logic
 
 ## True Peak Limiter
@@ -140,6 +151,11 @@ NOT turn these back into user-facing parameters:
   the True Peak Limiter's genuine true-peak guarantee, not a name earlier stages
   couldn't back up. Do not resurrect "Peak Ceiling" or "Out Ceiling" as this control's
   GUI label.
+- "Gain Match" (renamed from "Auto Gain", `limiter_auto_gain`): now targets TP Limit
+  instead of the raw dry/source signal, and can boost as well as cut -- see `## Limiter
+  Core`. Do not resurrect "Auto Gain" as this control's GUI label; it undersells that
+  the feature is specifically about matching loudness for a fair comparison, not adding
+  makeup gain.
 
 ## Manual (PDF) Distribution
 - The installer copies the manual PDF directly alongside the plugin binaries themselves

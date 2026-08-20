@@ -82,7 +82,7 @@ namespace StudioConsolePainter
 
     // Toggle/radio-segment chrome: gradient fill + glow when on, flat when off. Takes a
     // single accent colour (matching how callers already specify one "on" colour per
-    // button, e.g. the amber Auto Gain/Bypass/Delta family or the blue OS-factor
+    // button, e.g. the amber Gain Match/Bypass/Delta family or the blue OS-factor
     // family) and derives the gradient's light/dark ends plus a near-black, hue-tinted
     // on-state text colour from it, rather than requiring three colours per call site.
     inline void paintToggleChrome (juce::Graphics& g, juce::Rectangle<float> bounds, bool on,

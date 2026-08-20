@@ -111,9 +111,9 @@ WishcraftMasteringLimiterAudioProcessorEditor::WishcraftMasteringLimiterAudioPro
         [] (float v) { return juce::String (v, 2) + " dB"; });
     contentComponent.addAndMakeVisible (*outputCeilingKnob);
 
-    autoGainButton = std::make_unique<WishcraftButton> (
-        rangedParam ("limiter_auto_gain"), "Auto Gain", StudioConsoleTheme::accentAmber);
-    contentComponent.addAndMakeVisible (*autoGainButton);
+    gainMatchButton = std::make_unique<WishcraftButton> (
+        rangedParam ("limiter_auto_gain"), "Gain Match", StudioConsoleTheme::accentAmber);
+    contentComponent.addAndMakeVisible (*gainMatchButton);
 
     oversamplingLabel.setText ("Oversampling", juce::dontSendNotification);
     oversamplingLabel.setFont (juce::FontOptions (13.0f));
@@ -270,19 +270,25 @@ void WishcraftMasteringLimiterAudioProcessorEditor::layoutContent()
         outputCeilingKnob->setBounds (juce::Rectangle<int> (knobW, knobH).withCentre (row3.getCentre()));
         interior.removeFromTop (6);
         auto row4 = interior.removeFromTop (22);
-        autoGainButton->setBounds (juce::Rectangle<int> (90, 22).withCentre (row4.getCentre()));
+        gainMatchButton->setBounds (juce::Rectangle<int> (90, 22).withCentre (row4.getCentre()));
     }
 
     utilityGroup.setBounds (c2X, utlY, c2W, utlH);
     {
         auto interior = utilityGroup.getBounds().withTrimmedTop (headerH).reduced (4, 2);
-        oversamplingLabel.setBounds (interior.removeFromTop (18));
-        interior.removeFromTop (2);
-        auto row1 = interior.removeFromTop (22);
-        osChoiceRadio->setBounds (juce::Rectangle<int> (210, 22).withCentre (row1.getCentre()));
-        interior.removeFromTop (8);
-        auto row2 = interior.removeFromTop (22);
-        bypassButton->setBounds (juce::Rectangle<int> (90, 22).withCentre (row2.getCentre()));
+        // Oversampling label+radio group centered as a block in the upper half; Bypass
+        // centered in the lower half -- was previously packed at the top with a lot of
+        // unused space left below.
+        auto upperHalf = interior.removeFromTop (interior.getHeight() / 2);
+        auto lowerHalf = interior;
+
+        constexpr int osBlockH = 18 + 2 + 22; // label + gap + radio row
+        auto osBlock = upperHalf.withSizeKeepingCentre (upperHalf.getWidth(), osBlockH);
+        oversamplingLabel.setBounds (osBlock.removeFromTop (18));
+        osBlock.removeFromTop (2);
+        osChoiceRadio->setBounds (juce::Rectangle<int> (210, 22).withCentre (osBlock.getCentre()));
+
+        bypassButton->setBounds (juce::Rectangle<int> (90, 22).withCentre (lowerHalf.getCentre()));
     }
 
     // ---- Columns 3-5: meters ----

@@ -56,7 +56,7 @@ namespace StudioConsoleTheme
     // Single "on" accent per button family -- StudioConsolePainter::paintToggleChrome
     // derives the gradient's light/dark ends and the on-state text colour from
     // whichever one of these is passed in, so call sites only ever specify one colour.
-    static const juce::Colour accentAmber        = fromHex (0xf0ad1f); // Auto Gain / Bypass / Delta
+    static const juce::Colour accentAmber        = fromHex (0xf0ad1f); // Gain Match / Bypass / Delta
     static const juce::Colour accentBlue         = fromHex (0x2f8fdb); // OS factor radio group
 
     static const juce::Colour meterBackground    = fromHex (0x10151c);
@@ -123,7 +123,7 @@ namespace StudioConsoleTheme
     }
 
     // Toggle-on / radio-on fill, parameterised by accent so both the amber
-    // (Auto Gain/Bypass/Delta) and blue (OS factor) button families share one factory.
+    // (Gain Match/Bypass/Delta) and blue (OS factor) button families share one factory.
     inline juce::ColourGradient buttonOnFill (juce::Rectangle<float> bounds, juce::Colour top, juce::Colour bottom)
     {
         return juce::ColourGradient (top, bounds.getX(), bounds.getY(),

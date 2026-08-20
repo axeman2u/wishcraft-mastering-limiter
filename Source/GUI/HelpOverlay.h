@@ -103,7 +103,7 @@ private:
         addHeader ("WORKFLOW");
         addBody ("1. Selective Clipper -- set Threshold and Selectivity first.\n"
                  "2. Gain -- use Input Gain to drive the already-clipped signal into the Limiter.\n"
-                 "3. Limiter -- dial in Threshold, Release, Link, and Auto Gain last.\n\n"
+                 "3. Limiter -- dial in Threshold, Release, Link, and Gain Match last.\n\n"
                  "This is the opposite order from most limiter plugins, where you'd normally start with "
                  "the limiter itself.");
 
@@ -128,10 +128,11 @@ private:
                  "less sustained content for the duration gate to exempt in the first place.");
 
         addHeader ("CONTROLS");
-        addTip ("Auto Gain --", "lets you A/B different Limiter settings without the \"louder sounds "
-                "better\" bias, since it keeps output level roughly matched regardless of how much gain "
-                "reduction is happening. Turn it off before your final render/bounce -- the reduction it "
-                "applies is dynamic and isn't meant to set your actual output loudness.");
+        addTip ("Gain Match --", "keeps the processed signal near your TP Limit setting regardless of "
+                "how much gain reduction is happening, so different Threshold settings stay loudness-"
+                "matched to each other and toggling it on/off shouldn't require touching your monitor "
+                "volume. Turn it off before your final render/bounce -- it's for comparing settings by "
+                "ear, not for setting your actual output loudness.");
         addTip ("Delta --", "solos what the Selective Clipper is removing, gained up so it's actually "
                 "audible. Use it to dial in Threshold and Selectivity by ear before trusting them blind -- "
                 "remember you can push Threshold more aggressively than you'd expect from a standard "
