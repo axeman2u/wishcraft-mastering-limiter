@@ -193,8 +193,9 @@ juce::AudioProcessorValueTreeState::ParameterLayout WishcraftMasteringLimiterAud
 
     // JSFX slider14:limiter_auto_gain=0<0,1,1{Off,On}>-Limiter Auto Gain -- displayed as
     // "Gain Match" (renamed per explicit user request; param ID kept for automation/
-    // state compatibility). Now gain-matches toward TP Limit rather than the raw
-    // pre-processing source -- see Limiter.h's class-level doc comment for why.
+    // state compatibility; DSP behavior unchanged from the JSFX -- strictly cut-only,
+    // targets the raw pre-processing source. See Limiter.h's class-level doc comment
+    // for the story of a later attempt to retarget this that was reverted).
     layout.add (std::make_unique<juce::AudioParameterBool> (
         juce::ParameterID { "limiter_auto_gain", 1 },
         "Gain Match",

@@ -327,10 +327,9 @@ def build():
          "blended after smoothing using min-gain-wins logic."],
         ["TP Limit", "−3 to 0 dB", "−0.1 dB", "The True Peak Limiter's target ceiling "
          "— see “True Peak Accuracy” below for what this guarantee actually covers."],
-        ["Gain Match", "On/Off", "Off", "Keeps the processed signal near your TP Limit "
-         "setting regardless of gain reduction, so different Threshold settings stay "
-         "loudness-matched and toggling it doesn't require touching your monitor "
-         "volume. For A/B'ing by ear — turn off before your final render/bounce."],
+        ["Gain Match", "On/Off", "Off", "Keeps output level roughly matched regardless of "
+         "gain reduction, for A/B'ing settings without a loudness bias. Strictly cut-"
+         "only — never boosts. Turn off before your final render/bounce."],
     ], col_widths))
 
     story.append(Paragraph("Utility", styles["H2"]))

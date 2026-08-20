@@ -7,9 +7,19 @@
 
 // Peak-follower level tracker on both a dry and a processed signal (fast attack catches
 // the actual peak, slower release holds a "recent peak" estimate), with the ratio applied
-// as makeup gain -- matches the JSFX's apply_makeup(). Used by the Selective Clipper's
-// permanently-on Auto Makeup Gain (clamp [0, 12] dB -- never attenuate, only restore what
-// clipping took).
+// as makeup gain -- matches the JSFX's apply_makeup(). Reused for both the Selective
+// Clipper's permanently-on Auto Makeup Gain and the Limiter's user-toggleable Gain Match
+// (originally "Auto Gain" -- renamed per explicit user request, DSP behavior unchanged);
+// each caller supplies its own clamp range (Character: [0, 12] dB, never attenuate, only
+// restore what it took; Gain Match: [-60, 0], which can also reduce gain, since Drive
+// alone can otherwise make the processed signal louder than dry with nothing to pull it
+// back down).
+//
+// NOT RETARGETED: an attempt was made to have Gain Match target TP Limit instead of the
+// dry/source signal here (a separate applyGainMatch() function, since removed) -- see
+// Limiter.h's class-level doc comment for the full story of why that was tried, fixed
+// once, and then explicitly reverted per user request. Don't reintroduce it without a
+// fresh explicit request.
 inline double applyPeakRatioMakeup (double& peakDry, double& peakChar,
                                      double dryVal, double charVal,
                                      double attackCoeff, double releaseCoeff,
@@ -28,29 +38,6 @@ inline double applyPeakRatioMakeup (double& peakDry, double& peakChar,
     peakChar = flushDenormal (peakChar);
 
     double gainLin = peakDry / std::max (peakChar, 0.0000001);
-    gainLin = std::min (std::max (gainLin, std::pow (10.0, minGainDb / 20.0)), std::pow (10.0, maxGainDb / 20.0));
-    return charVal * gainLin;
-}
-
-// Peak-follower on just the processed signal, gain-matched toward a FIXED target level
-// (not a second peak-followed signal) -- backs the Limiter's user-toggleable Gain Match.
-// Unlike applyPeakRatioMakeup, the target here doesn't need its own peak-following: it's
-// already a smoothed control-rate value (the TP Limit ceiling), not fluctuating audio.
-// Can both cut AND boost (see minGainDb/maxGainDb), unlike Auto Makeup Gain above --
-// Gain Match's whole point is landing near a fixed loud reference regardless of whether
-// the current Threshold setting naturally sits above or below it.
-inline double applyGainMatch (double& peakChar, double targetLin, double charVal,
-                               double attackCoeff, double releaseCoeff,
-                               double minGainDb, double maxGainDb)
-{
-    const double charAbs = std::abs (charVal);
-
-    if (charAbs > peakChar) peakChar += (charAbs - peakChar) * attackCoeff;
-    else                    peakChar += (charAbs - peakChar) * releaseCoeff;
-
-    peakChar = flushDenormal (peakChar);
-
-    double gainLin = targetLin / std::max (peakChar, 0.0000001);
     gainLin = std::min (std::max (gainLin, std::pow (10.0, minGainDb / 20.0)), std::pow (10.0, maxGainDb / 20.0));
     return charVal * gainLin;
 }

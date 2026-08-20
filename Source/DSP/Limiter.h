@@ -11,10 +11,9 @@
 // Ports the JSFX's Limiter core: a lookahead delay + program-dependent release using a
 // two-time-constant history blend (limiter_compute_gr / limiter_apply), Stereo Link
 // (blended after smoothing, min-gain-wins), and Gain Match (JSFX slider14, originally
-// "Limiter Auto Gain" -- renamed and its target retargeted per explicit user request,
-// see below; param ID stays limiter_auto_gain for automation/state compatibility). Also
-// applies Input Gain (Drive), which the spec places after the Selective Clipper and
-// before the Limiter.
+// "Limiter Auto Gain" -- renamed per explicit user request, see below; param ID stays
+// limiter_auto_gain for automation/state compatibility). Also applies Input Gain
+// (Drive), which the spec places after the Selective Clipper and before the Limiter.
 //
 // The Limiter's own sidechain-filtered detector runs through a SEPARATE filter instance
 // from the Selective Clipper's (per spec, they must not share state), driven by the same
@@ -28,17 +27,20 @@
 // color the Limiter's output, not just its detection -- ported to match the JSFX exactly,
 // not "fixed" to a stricter detector-only interpretation.
 //
-// Gain Match (renamed from "Limiter Auto Gain" per explicit user request) used to be
-// strictly cut-only, targeting unity relative to the raw pre-processing dry/source
-// signal -- but that source signal is typically much quieter than a properly-driven,
-// limited "mastered" result, so engaging it dropped output well below whatever loudness
-// the user actually monitors at, forcing a volume-knob round-trip on every A/B. It now
-// targets TP Limit (outputCeilingSmoothed) instead -- a fixed, user-chosen, already-loud
-// reference -- and can both cut AND boost toward it (see PeakFollowerMakeup.h's
-// applyGainMatch), so different Threshold settings still land at a consistent loudness
-// relative to EACH OTHER (preserving the original "fair A/B, no louder-sounds-better
-// bias" purpose) while also staying close to the user's monitoring level regardless of
-// whether Gain Match is on or off.
+// Gain Match is strictly cut-only: unlike a compressor's makeup gain, it must never
+// restore level above unity, so its cap is a fixed 0.0 dB rather than a formula derived
+// from any peak-ceiling value (that used to route through ISP_MARGIN_DB before
+// TruePeakLimiter/SafetyClip took over true-peak safety -- see TruePeakLimiter.h).
+//
+// NOT RETARGETED: a later attempt made this target TP Limit instead of the raw dry/
+// source signal (reasoning: the source is typically much quieter than a driven,
+// limited "mastered" result, so engaging Gain Match dropped output well below the
+// user's monitoring level). That version had a real bug (a peak-follower cold-start/
+// silence-recovery transient), which was found and fixed -- but the user reported it
+// "still doesn't work right" even after the fix, and asked to revert the DSP behavior
+// entirely back to this original dry/source-targeting, cut-only version while keeping
+// only the "Gain Match" name. Do not reintroduce TP-Limit targeting without a fresh
+// explicit request -- this was tried once and explicitly rejected.
 //
 // KNOWN ISSUE (Stage 4, unresolved, deprioritized by request): direct REAPER-rendered
 // comparison against the real JSFX shows this Limiter applies ~0.11-0.16 dB MORE gain
@@ -165,12 +167,12 @@ public:
 
     // One oversampled tick for both channels: Input Gain -> Limiter's own sidechain-
     // filtered detector -> gain-reduction computer -> Stereo Link blend -> lookahead
-    // delay + apply -> optional full-chain Gain Match. dryL/dryR (the Selective Clipper's
-    // undelayed-further dry reference) are no longer Gain Match's comparison point --
-    // that now targets outputCeilingSmoothed instead (see the class-level doc comment
-    // above) -- but they're still needed here for dryRawL/dryRawR and
-    // dryGainedDelayedL/R below. dryRawL/dryRawR are dry_L/dry_R (the Selective
-    // Clipper's raw, un-gained dry reference) delayed by this Limiter's own
+    // delay + apply -> optional full-chain Gain Match. dryL/dryR are the Selective
+    // Clipper's (undelayed-further) dry reference, used only as Gain Match's peak-ratio
+    // comparison point -- matches the JSFX using dry_L/dry_R directly rather than a
+    // Limiter-delayed copy, since apply_makeup's slow peak followers don't need
+    // sample-accurate alignment. dryRawL/dryRawR are ALSO returned: dry_L/dry_R (the
+    // Selective Clipper's raw, un-gained dry reference) delayed by this Limiter's own
     // la_buf_size, matching the JSFX's dry_raw_la_L/R -- Bypass's true-passthrough
     // reference, latency-matched to the full chain but never touched by Input Gain,
     // Sidechain EQ, or gain reduction.
@@ -236,21 +238,9 @@ public:
 
         if (gainMatchOn)
         {
-            // Targets TP Limit (outputCeilingSmoothed), not the raw dry/source signal --
-            // see this class's top-of-file doc comment for why. Asymmetric range: -24dB
-            // of cut is safe (just makes an over-hot signal quieter), but the boost side
-            // is deliberately conservative (+6dB, not the +24dB first tried) because
-            // fullGainPeakChar starts at (and can decay back to, after any quiet passage)
-            // 0.0 while targetLin is a fixed nonzero value from sample one -- during the
-            // ~5ms attack ramp before fullGainPeakChar catches up to the true signal
-            // level, target/tinyPeakChar briefly computes a huge ratio. A wide boost
-            // clamp let that transient through as an audible, distorted-sounding spike
-            // (confirmed via an offline peak/RMS test: with +24dB allowed, a steady tone
-            // produced peak=15.68 in the first 50ms before settling to a sane ~1.0);
-            // +6dB bounds the same transient to something mild.
-            const double targetLin = std::pow (10.0, outputCeilingSmoothed / 20.0);
-            outL = applyGainMatch (left.fullGainPeakChar,  targetLin, limL, makeupAttackCoeff, makeupReleaseCoeff, -24.0, 6.0);
-            outR = applyGainMatch (right.fullGainPeakChar, targetLin, limR, makeupAttackCoeff, makeupReleaseCoeff, -24.0, 6.0);
+            // Fixed 0.0 dB cap -- strictly cut-only, unlike a compressor's makeup gain.
+            outL = applyPeakRatioMakeup (left.fullGainPeakDry,  left.fullGainPeakChar,  dryL, limL, makeupAttackCoeff, makeupReleaseCoeff, -60.0, 0.0);
+            outR = applyPeakRatioMakeup (right.fullGainPeakDry, right.fullGainPeakChar, dryR, limR, makeupAttackCoeff, makeupReleaseCoeff, -60.0, 0.0);
         }
         else
         {
@@ -274,7 +264,7 @@ private:
         std::vector<double> laDryBuf;      // JSFX la_dry_bufL/R -- Delta's gained dry reference
         double grSmoothedDb = 0.0, grHistoryDb = 0.0;
         SidechainFilter sidechain;
-        double fullGainPeakChar = 0.0; // Gain Match's peak-follower on the processed signal
+        double fullGainPeakDry = 0.0, fullGainPeakChar = 0.0;
 
         void prepareCapacity (int maxBufAlloc)
         {
@@ -293,6 +283,7 @@ private:
             grSmoothedDb = 0.0;
             grHistoryDb = 0.0;
             sidechain = {};
+            fullGainPeakDry = 0.0;
             fullGainPeakChar = 0.0;
         }
     };
