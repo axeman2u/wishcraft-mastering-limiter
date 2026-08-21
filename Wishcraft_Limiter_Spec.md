@@ -175,6 +175,12 @@ NOT turn these back into user-facing parameters:
   locations (plus the equivalent per-user folders on macOS), so users never need to
   know where it lives — they open it from inside the plugin. Button is disabled with
   a tooltip if the file genuinely can't be found.
+- macOS installer lets the user pick which format(s) to install (`customize="always"`
+  in the productbuild distribution XML, per explicit user request) — **both VST3 and
+  AU default to selected**, matching "install both unless told otherwise." Each
+  format's own `<choice>` carries the manual alongside it (`root-vst3`/`root-au`
+  staging in `Packaging/macOS/build_installer.sh` each get their own copy), so
+  whichever format(s) the user keeps checked still gets the manual installed with it.
 
 ## Trial Build
 Not part of the normal free/full release — a special build for handing out to beta

@@ -174,9 +174,10 @@ This installs $OUT_LABEL:
   - VST3 + PDF manual  -> /Library/Audio/Plug-Ins/VST3/
   - Audio Unit (AU) + PDF manual  -> /Library/Audio/Plug-Ins/Components/
 
-Both plugin formats are universal binaries (Apple Silicon + Intel). Open the
-manual any time from within the plugin itself via the "?" button, then
-"Manual (PDF)".
+Both are installed by default -- the next screen lets you uncheck either
+one if you only need one plugin format. Both plugin formats are universal
+binaries (Apple Silicon + Intel). Open the manual any time from within the
+plugin itself via the "?" button, then "Manual (PDF)".
 
 This installer is not yet code-signed. If macOS blocks it as being from an
 unidentified developer, right-click the installer and choose Open, or allow
@@ -194,21 +195,45 @@ productbuild --synthesize \
     --package "$WORK_DIR/pkgs/au.pkg" \
     "$WORK_DIR/distribution.xml" > /dev/null
 
-# --synthesize only lists <pkg-ref>s; add the readable title/options productbuild needs
-# for a proper install UI (welcome/license screens, sane window title).
-python3 - "$WORK_DIR/distribution.xml" "$OUT_LABEL" <<'PYEOF'
+# --synthesize already emits its own <options .../> (with hostArchitectures) plus a
+# full choices-outline/choice structure for this multi-package distribution -- each
+# <choice> just starts out hidden (visible="false") since customize="never" makes
+# per-package selection moot by default. Add the readable title/welcome/license
+# productbuild needs, flip customize to "always" so the component-selection screen
+# actually shows, and give each format's choice a label + explicit default-selected
+# state (both checked by default, matching "install both unless told otherwise").
+python3 - "$WORK_DIR/distribution.xml" "$OUT_LABEL" "$IDENTIFIER_PREFIX" <<'PYEOF'
 import sys
-path, title = sys.argv[1], sys.argv[2]
+path, title, identifier_prefix = sys.argv[1], sys.argv[2], sys.argv[3]
 with open(path) as f:
     xml = f.read()
+
 xml = xml.replace(
     "<installer-gui-script minSpecVersion=\"1\">",
     "<installer-gui-script minSpecVersion=\"1\">\n"
     f"    <title>{title}</title>\n"
     "    <welcome file=\"welcome.txt\"/>\n"
     "    <license file=\"license.txt\"/>\n"
-    "    <options customize=\"never\" require-scripts=\"false\"/>\n"
 )
+
+xml = xml.replace('customize="never"', 'customize="always"')
+
+vst3_id = identifier_prefix + ".vst3"
+au_id = identifier_prefix + ".au"
+
+xml = xml.replace(
+    f'<choice id="{vst3_id}" visible="false">',
+    f'<choice id="{vst3_id}" title="VST3 Plug-in" '
+    'description="Installs to /Library/Audio/Plug-Ins/VST3/." '
+    'visible="true" selected="true">'
+)
+xml = xml.replace(
+    f'<choice id="{au_id}" visible="false">',
+    f'<choice id="{au_id}" title="Audio Unit (AU) Plug-in" '
+    'description="Installs to /Library/Audio/Plug-Ins/Components/." '
+    'visible="true" selected="true">'
+)
+
 with open(path, "w") as f:
     f.write(xml)
 PYEOF
